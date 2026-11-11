@@ -1,0 +1,26 @@
+build/
+stage/
+stage-*/
+backups/
+*.o
+*.so
+*.a
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+compile_commands.json
+
+# Local diagnostic binaries and generated captures
+test_960
+test_filter_like
+test_formats
+test_yunet
+xcomposite_probe
+*.ppm
+*.log
+
+# Local editor and OS files
+.vscode/
+.idea/
+.DS_Store

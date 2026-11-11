@@ -1,0 +1,109 @@
+uniform float4x4 ViewProj;
+uniform texture2d image;
+uniform float2 texel_size;
+uniform float threshold;
+uniform float strength;
+uniform float color_levels;
+uniform float saturation;
+uniform float fill_strength;
+uniform float comic_strength;
+uniform float4 outline_color;
+uniform float4 fill_color;
+uniform int face_count;
+uniform float4 face_box0;
+uniform float4 face_box1;
+uniform float4 face_box2;
+uniform float4 face_box3;
+uniform float4 face_box4;
+uniform float4 face_box5;
+uniform float4 face_box6;
+uniform float4 face_box7;
+uniform float4 face_box_color;
+uniform float face_box_width;
+
+sampler_state linear_sampler {
+    Filter = Linear;
+    AddressU = Clamp;
+    AddressV = Clamp;
+};
+
+struct VertData {
+    float4 pos : POSITION;
+    float2 uv  : TEXCOORD0;
+};
+
+VertData VSDefault(VertData v)
+{
+    v.pos = mul(float4(v.pos.xyz, 1.0), ViewProj);
+    return v;
+}
+
+float luminance(float3 color)
+{
+    return dot(color, float3(0.2126, 0.7152, 0.0722));
+}
+
+float3 posterize(float3 color, float levels)
+{
+    float divisor = max(levels - 1.0, 1.0);
+    return floor(color * divisor + 0.5) / divisor;
+}
+
+bool on_face_box(float2 uv, float4 box)
+{
+    float2 box_min = box.xy;
+    float2 box_max = box.xy + box.zw;
+    bool inside = uv.x >= box_min.x && uv.x <= box_max.x &&
+                  uv.y >= box_min.y && uv.y <= box_max.y;
+    float2 distance_to_edge = min(uv - box_min, box_max - uv);
+    return inside && min(distance_to_edge.x, distance_to_edge.y) <= face_box_width;
+}
+
+float4 PSContour(VertData v) : TARGET
+{
+    float2 p = texel_size;
+
+    float tl = luminance(image.Sample(linear_sampler, v.uv + p * float2(-1.0, -1.0)).rgb);
+    float tc = luminance(image.Sample(linear_sampler, v.uv + p * float2( 0.0, -1.0)).rgb);
+    float tr = luminance(image.Sample(linear_sampler, v.uv + p * float2( 1.0, -1.0)).rgb);
+    float ml = luminance(image.Sample(linear_sampler, v.uv + p * float2(-1.0,  0.0)).rgb);
+    float mr = luminance(image.Sample(linear_sampler, v.uv + p * float2( 1.0,  0.0)).rgb);
+    float bl = luminance(image.Sample(linear_sampler, v.uv + p * float2(-1.0,  1.0)).rgb);
+    float bc = luminance(image.Sample(linear_sampler, v.uv + p * float2( 0.0,  1.0)).rgb);
+    float br = luminance(image.Sample(linear_sampler, v.uv + p * float2( 1.0,  1.0)).rgb);
+
+    float gx = -tl - 2.0 * ml - bl + tr + 2.0 * mr + br;
+    float gy = -tl - 2.0 * tc - tr + bl + 2.0 * bc + br;
+    float edge = sqrt(gx * gx + gy * gy);
+    edge = smoothstep(threshold, threshold + 0.08, edge) * strength;
+
+    float4 original = image.Sample(linear_sampler, v.uv);
+    float3 flat_color = posterize(original.rgb, color_levels);
+    float flat_luma = luminance(flat_color);
+    flat_color = lerp(float3(flat_luma, flat_luma, flat_luma),
+                      flat_color, saturation);
+    flat_color = lerp(flat_color, fill_color.rgb, fill_strength);
+
+    float3 result = lerp(original.rgb, flat_color, comic_strength);
+    result = lerp(result, outline_color.rgb, saturate(edge));
+
+    if (face_count > 0 && on_face_box(v.uv, face_box0)) result = face_box_color.rgb;
+    if (face_count > 1 && on_face_box(v.uv, face_box1)) result = face_box_color.rgb;
+    if (face_count > 2 && on_face_box(v.uv, face_box2)) result = face_box_color.rgb;
+    if (face_count > 3 && on_face_box(v.uv, face_box3)) result = face_box_color.rgb;
+    if (face_count > 4 && on_face_box(v.uv, face_box4)) result = face_box_color.rgb;
+    if (face_count > 5 && on_face_box(v.uv, face_box5)) result = face_box_color.rgb;
+    if (face_count > 6 && on_face_box(v.uv, face_box6)) result = face_box_color.rgb;
+    if (face_count > 7 && on_face_box(v.uv, face_box7)) result = face_box_color.rgb;
+
+    return float4(result, original.a);
+}
+
+technique Draw
+{
+    pass
+    {
+        vertex_shader = VSDefault(v);
+        pixel_shader = PSContour(v);
+    }
+}

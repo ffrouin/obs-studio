@@ -1,0 +1,33 @@
+uniform float4x4 ViewProj;
+uniform texture2d image;
+
+sampler_state linear_sampler {
+    Filter = Linear;
+    AddressU = Clamp;
+    AddressV = Clamp;
+};
+
+struct VertData {
+    float4 pos : POSITION;
+    float2 uv  : TEXCOORD0;
+};
+
+VertData VSDefault(VertData v)
+{
+    v.pos = mul(float4(v.pos.xyz, 1.0), ViewProj);
+    return v;
+}
+
+float4 PSCopy(VertData v) : TARGET
+{
+    return image.Sample(linear_sampler, v.uv);
+}
+
+technique Draw
+{
+    pass
+    {
+        vertex_shader = VSDefault(v);
+        pixel_shader = PSCopy(v);
+    }
+}
