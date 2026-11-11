@@ -41,7 +41,7 @@ The plugin registers two independent OBS filters:
 - **Vision contour filter** — GPU contour detection and comic colorization.
 - **Face detection filter** — asynchronous YuNet face detection with optional green face-detection rectangles, an optional pixel-art sunglasses overlay on the largest tracked face, an optional pirate-hat overlay on the second-largest tracked face, and an optional clown-mask overlay on the third-largest tracked face. The rectangle display can be disabled in the filter properties. Sunglasses, the hat, and the clown mask are disabled by default. Overlay targets lock or switch after 600 ms of stability.
 
-The face filter now resolves the encoded OBS XComposite selection using the stored title/class fallback when its numeric window handle is stale.
+The XComposite resolver accepts the stable static X11 name `chromium-obs-studio` in either the window title or WM_CLASS resource/class fields, so tab-dependent Chromium titles do not need to remain fixed.
 ## Deployment script
 
 The project includes `deploy.sh`. It deploys the current staged files to the system OBS installation at `/usr/lib/obs-plugins` and `/usr/share/obs/obs-plugins`. The script uses the user-owned `stage-sunglasses/` directory so rebuilding does not require root access.

@@ -10,6 +10,10 @@
 #include <sstream>
 #include <vector>
 
+// Stable X11 identifier used when Chromium changes its tab-dependent title.
+// The capture window/class should be named "chromium-obs-studio".
+static constexpr const char *STATIC_CHROMIUM_NAME = "chromium-obs-studio";
+
 struct x11_capture_session::impl {
     Display *display = XOpenDisplay(nullptr);
 };
@@ -89,8 +93,12 @@ static bool window_matches(Display *display, Window window,
     const std::string res_class = has_class && hint.res_class ? hint.res_class : "";
     if (hint.res_name) XFree(hint.res_name);
     if (hint.res_class) XFree(hint.res_class);
-    const bool title_ok = wanted_title.empty() || title == wanted_title;
-    const bool class_ok = wanted_class.empty() || res_name == wanted_class || res_class == wanted_class;
+    const bool static_name_ok = title == STATIC_CHROMIUM_NAME ||
+                                res_name == STATIC_CHROMIUM_NAME ||
+                                res_class == STATIC_CHROMIUM_NAME;
+    const bool title_ok = wanted_title.empty() || title == wanted_title || static_name_ok;
+    const bool class_ok = wanted_class.empty() || res_name == wanted_class ||
+                          res_class == wanted_class || static_name_ok;
     return title_ok && class_ok;
 }
 
@@ -134,6 +142,8 @@ static Window resolve_selection(Display *display, const std::string &encoded,
     if (!id_text.empty() && id_text.back() == '\r') id_text.pop_back();
     if (!wanted_title.empty() && wanted_title.back() == '\r') wanted_title.pop_back();
     if (!wanted_class.empty() && wanted_class.back() == '\r') wanted_class.pop_back();
+    // Do not depend on a tab-dependent Chromium title. The stable configured
+    // X11 name is accepted for title or class matching during fallback.
     errno = 0;
     numeric_id = id_text.empty() ? 0 : std::strtoull(id_text.c_str(), nullptr, 10);
 
