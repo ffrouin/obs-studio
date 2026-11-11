@@ -107,6 +107,7 @@ struct vision_filter_data {
     bool sunglasses_overlay = false;
     bool pirate_hat_overlay = false;
     bool clown_mask_overlay = false;
+    std::array<int, 3> overlay_slots = {1, 2, 3};
     gs_image_file_t sunglasses_image{};
     gs_image_file_t pirate_hat_image{};
     gs_image_file_t clown_mask_image{};
@@ -205,6 +206,9 @@ static void face_defaults(obs_data_t *settings)
     obs_data_set_bool(settings, "sunglasses_overlay", false);
     obs_data_set_bool(settings, "pirate_hat_overlay", false);
     obs_data_set_bool(settings, "clown_mask_overlay", false);
+    obs_data_set_int(settings, "overlay_slot_1", 1);
+    obs_data_set_int(settings, "overlay_slot_2", 2);
+    obs_data_set_int(settings, "overlay_slot_3", 3);
 
 }
 
@@ -239,6 +243,16 @@ static obs_properties_t *face_properties(void *)
     obs_properties_add_bool(props, "sunglasses_overlay", obs_module_text("SunglassesOverlay"));
     obs_properties_add_bool(props, "pirate_hat_overlay", obs_module_text("PirateHatOverlay"));
     obs_properties_add_bool(props, "clown_mask_overlay", obs_module_text("ClownMaskOverlay"));
+    for (int slot = 1; slot <= 3; ++slot) {
+        const std::string name = "overlay_slot_" + std::to_string(slot);
+        obs_property_t *list = obs_properties_add_list(
+            props, name.c_str(), obs_module_text((std::string("OverlaySlot") + std::to_string(slot)).c_str()),
+            OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+        obs_property_list_add_int(list, obs_module_text("OverlayNone"), 0);
+        obs_property_list_add_int(list, obs_module_text("OverlaySunglasses"), 1);
+        obs_property_list_add_int(list, obs_module_text("OverlayPirateHat"), 2);
+        obs_property_list_add_int(list, obs_module_text("OverlayClownMask"), 3);
+    }
 
     return props;
 }
@@ -273,6 +287,10 @@ static void face_update(void *data, obs_data_t *settings)
     filter->sunglasses_overlay = obs_data_get_bool(settings, "sunglasses_overlay");
     filter->pirate_hat_overlay = obs_data_get_bool(settings, "pirate_hat_overlay");
     filter->clown_mask_overlay = obs_data_get_bool(settings, "clown_mask_overlay");
+    for (size_t i = 0; i < filter->overlay_slots.size(); ++i) {
+        const std::string name = "overlay_slot_" + std::to_string(i + 1);
+        filter->overlay_slots[i] = static_cast<int>(obs_data_get_int(settings, name.c_str()));
+    }
 
 }
 
@@ -549,20 +567,31 @@ static bool detection_is_alive(const vision_filter_data *filter)
     return now >= last && now - last <= 300000000ULL;
 }
 
+static size_t configured_overlay_rank(const vision_filter_data *filter, int overlay_id)
+{
+    for (size_t rank = 0; rank < filter->overlay_slots.size(); ++rank) {
+        if (filter->overlay_slots[rank] == overlay_id)
+            return rank;
+    }
+    return MAX_FACE_BOXES;
+}
+
 static bool update_sunglasses_target(vision_filter_data *filter,
                                      const std::vector<face_box> &faces,
-                                     face_box &target)
+                                     size_t rank, face_box &target)
 {
-    if (!filter->sunglasses_overlay || !detection_is_alive(filter) || faces.empty()) {
+    if (!filter->sunglasses_overlay || !detection_is_alive(filter) ||
+        faces.size() <= rank) {
         filter->sunglasses_candidate_valid = false;
         filter->sunglasses_locked = false;
         return false;
     }
 
-    const auto biggest = *std::max_element(
-        faces.begin(), faces.end(), [](const face_box &a, const face_box &b) {
+    std::vector<face_box> sorted_faces = faces;
+    std::sort(sorted_faces.begin(), sorted_faces.end(), [](const face_box &a, const face_box &b) {
             return a.width * a.height < b.width * b.height;
-        });
+    });
+    const face_box biggest = sorted_faces[sorted_faces.size() - 1 - rank];
     const auto now = std::chrono::steady_clock::now();
     constexpr float target_iou = 0.25f;
     constexpr auto lock_delay = std::chrono::milliseconds(600);
@@ -610,30 +639,20 @@ static bool update_sunglasses_target(vision_filter_data *filter,
 
 static bool update_pirate_hat_target(vision_filter_data *filter,
                                      const std::vector<face_box> &faces,
-                                     face_box &target)
+                                     size_t rank, face_box &target)
 {
-    if (!filter->pirate_hat_overlay || !detection_is_alive(filter) || faces.size() < 2) {
+    if (!filter->pirate_hat_overlay || !detection_is_alive(filter) ||
+        faces.size() <= rank) {
         filter->pirate_hat_candidate_valid = false;
         filter->pirate_hat_locked = false;
         return false;
     }
 
-    size_t largest = 0;
-    size_t second_largest = 1;
-    if (faces[second_largest].width * faces[second_largest].height >
-        faces[largest].width * faces[largest].height)
-        std::swap(largest, second_largest);
-    for (size_t i = 2; i < faces.size(); ++i) {
-        const float area = faces[i].width * faces[i].height;
-        const float second_area = faces[second_largest].width * faces[second_largest].height;
-        if (area > faces[largest].width * faces[largest].height) {
-            second_largest = largest;
-            largest = i;
-        } else if (area > second_area) {
-            second_largest = i;
-        }
-    }
-    const face_box second_face = faces[second_largest];
+    std::vector<face_box> sorted_faces = faces;
+    std::sort(sorted_faces.begin(), sorted_faces.end(), [](const face_box &a, const face_box &b) {
+        return a.width * a.height > b.width * b.height;
+    });
+    const face_box second_face = sorted_faces[rank];
     const auto now = std::chrono::steady_clock::now();
     constexpr float target_iou = 0.25f;
     constexpr auto lock_delay = std::chrono::milliseconds(600);
@@ -679,9 +698,10 @@ static bool update_pirate_hat_target(vision_filter_data *filter,
 
 static bool update_clown_mask_target(vision_filter_data *filter,
                                      const std::vector<face_box> &faces,
-                                     face_box &target)
+                                     size_t rank, face_box &target)
 {
-    if (!filter->clown_mask_overlay || !detection_is_alive(filter) || faces.size() < 3) {
+    if (!filter->clown_mask_overlay || !detection_is_alive(filter) ||
+        faces.size() <= rank) {
         filter->clown_mask_candidate_valid = false;
         filter->clown_mask_locked = false;
         return false;
@@ -691,7 +711,7 @@ static bool update_clown_mask_target(vision_filter_data *filter,
     std::sort(sorted_faces.begin(), sorted_faces.end(), [](const face_box &a, const face_box &b) {
         return a.width * a.height > b.width * b.height;
     });
-    const face_box third_face = sorted_faces[2];
+    const face_box third_face = sorted_faces[rank];
     const auto now = std::chrono::steady_clock::now();
     constexpr float target_iou = 0.25f;
     constexpr auto lock_delay = std::chrono::milliseconds(600);
@@ -749,8 +769,10 @@ static void render_faces(vision_filter_data *filter, uint32_t source_width,
                           ? static_cast<int>(faces.size()) : 0);
     struct vec4 sunglasses_box = {0.0f, 0.0f, 0.0f, 0.0f};
     face_box target{};
+    const size_t sunglasses_rank = configured_overlay_rank(filter, 1);
     if (filter->face_detection && filter->sunglasses_image_ready &&
-        update_sunglasses_target(filter, faces, target)) {
+        sunglasses_rank < MAX_FACE_BOXES &&
+        update_sunglasses_target(filter, faces, sunglasses_rank, target)) {
         const float image_aspect = filter->sunglasses_image.cy > 0
             ? static_cast<float>(filter->sunglasses_image.cx) /
               static_cast<float>(filter->sunglasses_image.cy)
@@ -778,8 +800,10 @@ static void render_faces(vision_filter_data *filter, uint32_t source_width,
     struct vec4 pirate_hat_box = {0.0f, 0.0f, 0.0f, 0.0f};
     float pirate_hat_angle = 0.0f;
     face_box hat_target{};
+    const size_t pirate_hat_rank = configured_overlay_rank(filter, 2);
     if (filter->face_detection && filter->pirate_hat_image_ready &&
-        update_pirate_hat_target(filter, faces, hat_target)) {
+        pirate_hat_rank < MAX_FACE_BOXES &&
+        update_pirate_hat_target(filter, faces, pirate_hat_rank, hat_target)) {
         const face_box &target = hat_target;
         const float image_aspect = filter->pirate_hat_image.cy > 0
             ? static_cast<float>(filter->pirate_hat_image.cx) /
@@ -808,8 +832,10 @@ static void render_faces(vision_filter_data *filter, uint32_t source_width,
     struct vec4 clown_mask_box = {0.0f, 0.0f, 0.0f, 0.0f};
     float clown_mask_angle = 0.0f;
     face_box mask_target{};
+    const size_t clown_mask_rank = configured_overlay_rank(filter, 3);
     if (filter->face_detection && filter->clown_mask_image_ready &&
-        update_clown_mask_target(filter, faces, mask_target)) {
+        clown_mask_rank < MAX_FACE_BOXES &&
+        update_clown_mask_target(filter, faces, clown_mask_rank, mask_target)) {
         const float image_aspect = filter->clown_mask_image.cy > 0
             ? static_cast<float>(filter->clown_mask_image.cx) /
               static_cast<float>(filter->clown_mask_image.cy)
