@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-STAGE_DIR="$PROJECT_DIR/stage-static-x11-name"
+STAGE_DIR="$PROJECT_DIR/stage-nose-centered"
 PLUGIN_DEST="/usr/lib/obs-plugins/obs-vision-filter.so"
 DATA_DEST="/usr/share/obs/obs-plugins/obs-vision-filter"
 BACKUP_DIR="$PROJECT_DIR/backups/$(date +%Y%m%d-%H%M%S)"

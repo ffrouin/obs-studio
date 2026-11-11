@@ -44,6 +44,7 @@ struct face_box {
     float height;
     float angle = 0.0f;
     float eye_y = 0.0f;
+    float nose_x = 0.0f;
 };
 
 struct face_track {
@@ -325,6 +326,7 @@ static std::vector<face_box> update_tracks(std::vector<face_track> &tracks,
                 track.box.height + (target.height - track.box.height) * alpha,
                 track.box.angle + (target.angle - track.box.angle) * alpha,
                 track.box.eye_y + (target.eye_y - track.box.eye_y) * alpha,
+                track.box.nose_x + (target.nose_x - track.box.nose_x) * alpha,
             };
             track.missed = 0;
             used[best_index] = true;
@@ -482,11 +484,15 @@ static void detector_loop(vision_filter_data *filter)
                     const float right_eye_y = detected.at<float>(row, 5);
                     const float left_eye_x = detected.at<float>(row, 6);
                     const float left_eye_y = detected.at<float>(row, 7);
+                    const float nose_x = detected.at<float>(row, 8);
                     const float angle = std::atan2(left_eye_y - right_eye_y,
                                                    left_eye_x - right_eye_x);
                     const float eye_y = std::clamp(
                         ((right_eye_y + left_eye_y) * 0.5f) / bgr.rows, 0.0f, 1.0f);
-                    normalized.push_back({nx, ny, nw, nh, angle, eye_y});
+                    const float normalized_nose_x = std::clamp(
+                        nose_x / bgr.cols, 0.0f, 1.0f);
+                    normalized.push_back({nx, ny, nw, nh, angle, eye_y,
+                                          normalized_nose_x});
                     ++filter->accepted_detections;
                 }
             }
@@ -757,7 +763,7 @@ static void render_faces(vision_filter_data *filter, uint32_t source_width,
             ? 1.0f - target.eye_y
             : target.eye_y;
         sunglasses_box = {
-            target.x,
+            target.nose_x - overlay_width * 0.5f,
             eye_y - overlay_height * 0.5f,
             overlay_width,
             overlay_height,
