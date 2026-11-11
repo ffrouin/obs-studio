@@ -27,8 +27,6 @@ static void resolve_input(vision_source_data *data)
     }
     if (!data->input_name.empty())
         data->source = obs_get_source_by_name(data->input_name.c_str());
-    blog(LOG_INFO, "Vision source tap input='%s' resolved=%s",
-         data->input_name.c_str(), data->source ? "yes" : "no");
 }
 
 static void *source_create(obs_data_t *settings, obs_source_t *)

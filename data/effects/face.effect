@@ -12,6 +12,15 @@ uniform float4 face_box7;
 
 uniform float4 face_box_color;
 uniform float face_box_width;
+uniform float4 sunglasses_box;
+uniform float sunglasses_angle;
+uniform texture2d sunglasses_image;
+uniform float4 pirate_hat_box;
+uniform float pirate_hat_angle;
+uniform texture2d pirate_hat_image;
+uniform float4 clown_mask_box;
+uniform float clown_mask_angle;
+uniform texture2d clown_mask_image;
 
 sampler_state linear_sampler {
     Filter = Linear;
@@ -40,10 +49,47 @@ bool on_face_box(float2 uv, float4 box)
     return inside && min(distance_to_edge.x, distance_to_edge.y) <= face_box_width;
 }
 
+float2 rotated_image_uv(float2 uv, float4 box, float angle)
+{
+    float2 delta = uv - (box.xy + box.zw * 0.5);
+    float c = cos(angle);
+    float s = sin(angle);
+    float2 rotated = float2(c * delta.x + s * delta.y,
+                            -s * delta.x + c * delta.y);
+    return rotated / box.zw + float2(0.5, 0.5);
+}
+
 float4 PSFace(VertData v) : TARGET
 {
     float4 original = image.Sample(linear_sampler, v.uv);
     float3 result = original.rgb;
+
+    if (sunglasses_box.z > 0.0 && sunglasses_box.w > 0.0) {
+        float2 glasses_uv = rotated_image_uv(v.uv, sunglasses_box, sunglasses_angle);
+        if (glasses_uv.x >= 0.0 && glasses_uv.x <= 1.0 &&
+            glasses_uv.y >= 0.0 && glasses_uv.y <= 1.0) {
+            float4 glasses = sunglasses_image.Sample(linear_sampler, glasses_uv);
+            result = lerp(result, glasses.rgb, glasses.a);
+        }
+    }
+
+    if (pirate_hat_box.z > 0.0 && pirate_hat_box.w > 0.0) {
+        float2 hat_uv = rotated_image_uv(v.uv, pirate_hat_box, pirate_hat_angle);
+        if (hat_uv.x >= 0.0 && hat_uv.x <= 1.0 &&
+            hat_uv.y >= 0.0 && hat_uv.y <= 1.0) {
+            float4 hat = pirate_hat_image.Sample(linear_sampler, hat_uv);
+            result = lerp(result, hat.rgb, hat.a);
+        }
+    }
+
+    if (clown_mask_box.z > 0.0 && clown_mask_box.w > 0.0) {
+        float2 mask_uv = rotated_image_uv(v.uv, clown_mask_box, clown_mask_angle);
+        if (mask_uv.x >= 0.0 && mask_uv.x <= 1.0 &&
+            mask_uv.y >= 0.0 && mask_uv.y <= 1.0) {
+            float4 mask = clown_mask_image.Sample(linear_sampler, mask_uv);
+            result = lerp(result, mask.rgb, mask.a);
+        }
+    }
 
 
     if (face_count > 0 && on_face_box(v.uv, face_box0)) result = face_box_color.rgb;

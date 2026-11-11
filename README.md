@@ -29,6 +29,8 @@ The staged files are:
 ```text
 lib/obs-plugins/obs-vision-filter.so
 share/obs/obs-plugins/obs-vision-filter/effects/contour.effect
+share/obs/obs-plugins/obs-vision-filter/effects/face.effect
+share/obs/obs-plugins/obs-vision-filter/models/face_detection_yunet_2026may.onnx
 share/obs/obs-plugins/obs-vision-filter/locale/en-US.ini
 ```
 
@@ -37,12 +39,12 @@ Do not install over the system OBS installation from this prototype. Copy the st
 The plugin registers two independent OBS filters:
 
 - **Vision contour filter** — GPU contour detection and comic colorization.
-- **Face detection filter** — asynchronous YuNet face detection with tracking boxes.
+- **Face detection filter** — asynchronous YuNet face detection with optional green face-detection rectangles, an optional pixel-art sunglasses overlay on the largest tracked face, an optional pirate-hat overlay on the second-largest tracked face, and an optional clown-mask overlay on the third-largest tracked face. The rectangle display can be disabled in the filter properties. Sunglasses, the hat, and the clown mask are disabled by default. Overlay targets lock or switch after 600 ms of stability.
 
 The face filter now resolves the encoded OBS XComposite selection using the stored title/class fallback when its numeric window handle is stale.
 ## Deployment script
 
-The project includes `deploy.sh`. It deploys the current staged files to the system OBS installation at `/usr/lib/obs-plugins` and `/usr/share/obs/obs-plugins`. The script uses the user-owned `stage-source-clone-resolver/` directory so rebuilding does not require root access.
+The project includes `deploy.sh`. It deploys the current staged files to the system OBS installation at `/usr/lib/obs-plugins` and `/usr/share/obs/obs-plugins`. The script uses the user-owned `stage-sunglasses/` directory so rebuilding does not require root access.
 
 Preview the actions without changing the system:
 

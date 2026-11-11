@@ -2,6 +2,7 @@
 #include <obs/obs.h>
 #include <obs/graphics/graphics.h>
 #include <obs/graphics/effect.h>
+#include <obs/graphics/image-file.h>
 #include <obs/graphics/vec2.h>
 #include <obs/graphics/vec4.h>
 #include "x11-capture.hpp"
@@ -15,6 +16,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
@@ -22,6 +24,15 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#ifndef VISION_DEBUG_LOGS
+#define VISION_DEBUG_LOGS 0
+#endif
+#if VISION_DEBUG_LOGS
+#define VISION_LOG(...) blog(__VA_ARGS__)
+#else
+#define VISION_LOG(...) do { } while (0)
+#endif
 
 namespace {
 constexpr size_t MAX_FACE_BOXES = 8;
@@ -31,6 +42,8 @@ struct face_box {
     float y;
     float width;
     float height;
+    float angle = 0.0f;
+    float eye_y = 0.0f;
 };
 
 struct face_track {
@@ -59,6 +72,15 @@ struct vision_filter_data {
 
     gs_eparam_t *face_box_color_param = nullptr;
     gs_eparam_t *face_box_width_param = nullptr;
+    gs_eparam_t *sunglasses_box_param = nullptr;
+    gs_eparam_t *sunglasses_angle_param = nullptr;
+    gs_eparam_t *sunglasses_image_param = nullptr;
+    gs_eparam_t *pirate_hat_box_param = nullptr;
+    gs_eparam_t *pirate_hat_angle_param = nullptr;
+    gs_eparam_t *pirate_hat_image_param = nullptr;
+    gs_eparam_t *clown_mask_box_param = nullptr;
+    gs_eparam_t *clown_mask_angle_param = nullptr;
+    gs_eparam_t *clown_mask_image_param = nullptr;
     std::array<gs_eparam_t *, MAX_FACE_BOXES> face_box_params{};
 
     double threshold = 0.20;
@@ -71,6 +93,7 @@ struct vision_filter_data {
     uint32_t fill_color = 0xFFFFFFFF;
 
     bool face_detection = true;
+    bool show_face_boxes = true;
     int face_interval = 3;
     double face_scale = 0.5;
     double face_min_size = 0.02;
@@ -78,8 +101,32 @@ struct vision_filter_data {
     double tracking_iou = 0.10;
     int tracking_hold = 5;
     bool flip_analysis_vertical = true;
-    uint32_t face_box_color = 0xFFFF0000;
+    uint32_t face_box_color = 0xFF00FF00;
     double face_box_width = 0.004;
+    bool sunglasses_overlay = false;
+    bool pirate_hat_overlay = false;
+    bool clown_mask_overlay = false;
+    gs_image_file_t sunglasses_image{};
+    gs_image_file_t pirate_hat_image{};
+    gs_image_file_t clown_mask_image{};
+    bool sunglasses_image_ready = false;
+    bool pirate_hat_image_ready = false;
+    bool clown_mask_image_ready = false;
+    bool sunglasses_candidate_valid = false;
+    bool sunglasses_locked = false;
+    face_box sunglasses_candidate{};
+    face_box sunglasses_locked_box{};
+    std::chrono::steady_clock::time_point sunglasses_candidate_since{};
+    bool pirate_hat_candidate_valid = false;
+    bool pirate_hat_locked = false;
+    face_box pirate_hat_candidate{};
+    face_box pirate_hat_locked_box{};
+    std::chrono::steady_clock::time_point pirate_hat_candidate_since{};
+    bool clown_mask_candidate_valid = false;
+    bool clown_mask_locked = false;
+    face_box clown_mask_candidate{};
+    face_box clown_mask_locked_box{};
+    std::chrono::steady_clock::time_point clown_mask_candidate_since{};
 
 
     std::mutex detection_mutex;
@@ -87,6 +134,8 @@ struct vision_filter_data {
     cv::Mat pending_bgr;
     bool pending_ready = false;
     std::vector<face_box> latest_faces;
+    std::atomic_bool current_detection_present{false};
+    std::atomic<uint64_t> last_detection_ns{0};
 
     std::atomic_bool stopping{false};
     std::thread detector_thread;
@@ -150,7 +199,11 @@ static void face_defaults(obs_data_t *settings)
     obs_data_set_int(settings, "tracking_hold", 5);
     obs_data_set_bool(settings, "flip_analysis_vertical", false);
     obs_data_set_double(settings, "face_box_width", 0.004);
-    obs_data_set_int(settings, "face_box_color", 0xFFFF0000);
+    obs_data_set_int(settings, "face_box_color", 0xFF00FF00);
+    obs_data_set_bool(settings, "show_face_boxes", true);
+    obs_data_set_bool(settings, "sunglasses_overlay", false);
+    obs_data_set_bool(settings, "pirate_hat_overlay", false);
+    obs_data_set_bool(settings, "clown_mask_overlay", false);
 
 }
 
@@ -172,6 +225,7 @@ static obs_properties_t *face_properties(void *)
 {
     obs_properties_t *props = obs_properties_create();
     obs_properties_add_bool(props, "face_detection", obs_module_text("FaceDetection"));
+    obs_properties_add_bool(props, "show_face_boxes", obs_module_text("ShowFaceBoxes"));
     obs_properties_add_int_slider(props, "face_interval", obs_module_text("FaceInterval"), 1, 10, 1);
     obs_properties_add_float_slider(props, "face_scale", obs_module_text("FaceScale"), 0.20, 1.0, 0.05);
     obs_properties_add_float_slider(props, "face_min_size", obs_module_text("FaceMinSize"), 0.02, 0.30, 0.01);
@@ -181,6 +235,9 @@ static obs_properties_t *face_properties(void *)
     obs_properties_add_bool(props, "flip_analysis_vertical", obs_module_text("FlipAnalysisVertical"));
     obs_properties_add_float_slider(props, "face_box_width", obs_module_text("FaceBoxWidth"), 0.001, 0.02, 0.001);
     obs_properties_add_color(props, "face_box_color", obs_module_text("FaceBoxColor"));
+    obs_properties_add_bool(props, "sunglasses_overlay", obs_module_text("SunglassesOverlay"));
+    obs_properties_add_bool(props, "pirate_hat_overlay", obs_module_text("PirateHatOverlay"));
+    obs_properties_add_bool(props, "clown_mask_overlay", obs_module_text("ClownMaskOverlay"));
 
     return props;
 }
@@ -202,6 +259,7 @@ static void face_update(void *data, obs_data_t *settings)
 {
     auto *filter = static_cast<vision_filter_data *>(data);
     filter->face_detection = obs_data_get_bool(settings, "face_detection");
+    filter->show_face_boxes = obs_data_get_bool(settings, "show_face_boxes");
     filter->face_interval = static_cast<int>(obs_data_get_int(settings, "face_interval"));
     filter->face_scale = obs_data_get_double(settings, "face_scale");
     filter->face_min_size = obs_data_get_double(settings, "face_min_size");
@@ -211,7 +269,9 @@ static void face_update(void *data, obs_data_t *settings)
     filter->flip_analysis_vertical = false;
     filter->face_box_width = obs_data_get_double(settings, "face_box_width");
     filter->face_box_color = static_cast<uint32_t>(obs_data_get_int(settings, "face_box_color"));
-    // Keep diagnostic graphics forced on until the coordinate path is verified.
+    filter->sunglasses_overlay = obs_data_get_bool(settings, "sunglasses_overlay");
+    filter->pirate_hat_overlay = obs_data_get_bool(settings, "pirate_hat_overlay");
+    filter->clown_mask_overlay = obs_data_get_bool(settings, "clown_mask_overlay");
 
 }
 
@@ -263,6 +323,8 @@ static std::vector<face_box> update_tracks(std::vector<face_track> &tracks,
                 track.box.y + (target.y - track.box.y) * alpha,
                 track.box.width + (target.width - track.box.width) * alpha,
                 track.box.height + (target.height - track.box.height) * alpha,
+                track.box.angle + (target.angle - track.box.angle) * alpha,
+                track.box.eye_y + (target.eye_y - track.box.eye_y) * alpha,
             };
             track.missed = 0;
             used[best_index] = true;
@@ -320,7 +382,7 @@ static void detector_loop(vision_filter_data *filter)
 
         if (bgr.empty())
             continue;
-        const uint64_t processed = ++filter->processed_frames;
+        ++filter->processed_frames;
 
         cv::Mat current_gray;
         cv::cvtColor(bgr, current_gray, cv::COLOR_BGR2GRAY);
@@ -358,7 +420,7 @@ static void detector_loop(vision_filter_data *filter)
                                          previous_points, current_points,
                                          status, errors);
             } catch (const cv::Exception &error) {
-                blog(LOG_WARNING, "Face tracking optical-flow reset: %s", error.what());
+                VISION_LOG(LOG_WARNING, "Face tracking optical-flow reset: %s", error.what());
                 current_points.clear();
                 status.clear();
             }
@@ -394,8 +456,6 @@ static void detector_loop(vision_filter_data *filter)
         const bool run_detection = filter->face_detector_ready;
 
         std::vector<face_box> normalized;
-        int raw_rows = 0;
-        float raw_x = 0.0f, raw_y = 0.0f, raw_width = 0.0f, raw_height = 0.0f, raw_score = 0.0f;
         if (run_detection && filter->face_detector_ready) {
             ++filter->detector_runs;
             cv::Mat detected;
@@ -403,12 +463,6 @@ static void detector_loop(vision_filter_data *filter)
             filter->face_detector->detect(bgr, detected);
             if (!detected.empty()) {
                 ++filter->detection_hits;
-                raw_rows = detected.rows;
-                raw_x = detected.at<float>(0, 0);
-                raw_y = detected.at<float>(0, 1);
-                raw_width = detected.at<float>(0, 2);
-                raw_height = detected.at<float>(0, 3);
-                raw_score = detected.at<float>(0, 14);
                 normalized.reserve(std::min(static_cast<size_t>(detected.rows), MAX_FACE_BOXES));
                 for (int row = 0; row < detected.rows && normalized.size() < MAX_FACE_BOXES; ++row) {
                     const float x = detected.at<float>(row, 0);
@@ -424,7 +478,15 @@ static void detector_loop(vision_filter_data *filter)
                     const float nh = std::clamp(height / bgr.rows, 0.0f, 1.0f - ny);
                     if (nw <= 0.0f || nh <= 0.0f)
                         continue;
-                    normalized.push_back({nx, ny, nw, nh});
+                    const float right_eye_x = detected.at<float>(row, 4);
+                    const float right_eye_y = detected.at<float>(row, 5);
+                    const float left_eye_x = detected.at<float>(row, 6);
+                    const float left_eye_y = detected.at<float>(row, 7);
+                    const float angle = std::atan2(left_eye_y - right_eye_y,
+                                                   left_eye_x - right_eye_x);
+                    const float eye_y = std::clamp(
+                        ((right_eye_y + left_eye_y) * 0.5f) / bgr.rows, 0.0f, 1.0f);
+                    normalized.push_back({nx, ny, nw, nh, angle, eye_y});
                     ++filter->accepted_detections;
                 }
             }
@@ -437,7 +499,14 @@ static void detector_loop(vision_filter_data *filter)
                 static_cast<float>(filter->tracking_smoothing),
                 static_cast<float>(filter->tracking_iou),
                 filter->tracking_hold);
+            const bool present = !normalized.empty();
+            filter->current_detection_present.store(present);
+            filter->last_detection_ns.store(
+                present ? static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count()) : 0);
         } else {
+            filter->current_detection_present.store(false);
+            filter->last_detection_ns.store(0);
             tracked.reserve(std::min(tracks.size(), MAX_FACE_BOXES));
             for (const face_track &track : tracks) {
                 if (tracked.size() == MAX_FACE_BOXES)
@@ -449,36 +518,6 @@ static void detector_loop(vision_filter_data *filter)
         previous_gray = std::move(current_gray);
         std::lock_guard<std::mutex> lock(filter->detection_mutex);
         filter->latest_faces = std::move(tracked);
-
-        if (processed % 60 == 0) {
-            cv::Scalar mean, deviation;
-            cv::meanStdDev(bgr, mean, deviation);
-            const auto &faces = filter->latest_faces;
-            if (faces.empty()) {
-                blog(LOG_INFO,
-                     "Face tracking diagnostics: submitted=%llu processed=%llu detector_runs=%llu detection_hits=%llu accepted=%llu tracks=0 mean_bgr=%.1f,%.1f,%.1f std_bgr=%.1f,%.1f,%.1f",
-                     static_cast<unsigned long long>(filter->submitted_frames.load()),
-                     static_cast<unsigned long long>(filter->processed_frames.load()),
-                     static_cast<unsigned long long>(filter->detector_runs.load()),
-                     static_cast<unsigned long long>(filter->detection_hits.load()),
-                     static_cast<unsigned long long>(filter->accepted_detections.load()),
-                     mean[0], mean[1], mean[2], deviation[0], deviation[1], deviation[2]);
-            } else {
-                blog(LOG_INFO,
-                     "Face tracking diagnostics: submitted=%llu processed=%llu detector_runs=%llu detection_hits=%llu accepted=%llu tracks=%zu box=%.3f,%.3f,%.3f,%.3f mean_bgr=%.1f,%.1f,%.1f std_bgr=%.1f,%.1f,%.1f",
-                     static_cast<unsigned long long>(filter->submitted_frames.load()),
-                     static_cast<unsigned long long>(filter->processed_frames.load()),
-                     static_cast<unsigned long long>(filter->detector_runs.load()),
-                     static_cast<unsigned long long>(filter->detection_hits.load()),
-                     static_cast<unsigned long long>(filter->accepted_detections.load()),
-                     faces.size(), faces[0].x, faces[0].y,
-                     faces[0].width, faces[0].height,
-                     mean[0], mean[1], mean[2], deviation[0], deviation[1], deviation[2]);
-            }
-            blog(LOG_INFO, "Face raw detector: rows=%d first=%.1f,%.1f,%.1f,%.1f score=%.3f input=%dx%d",
-                 raw_rows, raw_x, raw_y, raw_width, raw_height, raw_score,
-                 bgr.cols, bgr.rows);
-        }
     }
 }
 
@@ -492,7 +531,206 @@ static void set_color(gs_eparam_t *param, uint32_t packed)
     gs_effect_set_vec4(param, &color);
 }
 
-static void render_faces(vision_filter_data *filter)
+static bool detection_is_alive(const vision_filter_data *filter)
+{
+    if (!filter->current_detection_present.load())
+        return false;
+    const uint64_t last = filter->last_detection_ns.load();
+    if (last == 0)
+        return false;
+    const uint64_t now = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+    return now >= last && now - last <= 300000000ULL;
+}
+
+static bool update_sunglasses_target(vision_filter_data *filter,
+                                     const std::vector<face_box> &faces,
+                                     face_box &target)
+{
+    if (!filter->sunglasses_overlay || !detection_is_alive(filter) || faces.empty()) {
+        filter->sunglasses_candidate_valid = false;
+        filter->sunglasses_locked = false;
+        return false;
+    }
+
+    const auto biggest = *std::max_element(
+        faces.begin(), faces.end(), [](const face_box &a, const face_box &b) {
+            return a.width * a.height < b.width * b.height;
+        });
+    const auto now = std::chrono::steady_clock::now();
+    constexpr float target_iou = 0.25f;
+    constexpr auto lock_delay = std::chrono::milliseconds(600);
+
+    if (!filter->sunglasses_locked) {
+        if (!filter->sunglasses_candidate_valid ||
+            box_iou(filter->sunglasses_candidate, biggest) < target_iou) {
+            filter->sunglasses_candidate = biggest;
+            filter->sunglasses_candidate_since = now;
+            filter->sunglasses_candidate_valid = true;
+        } else {
+            filter->sunglasses_candidate = biggest;
+        }
+
+        if (now - filter->sunglasses_candidate_since >= lock_delay) {
+            filter->sunglasses_locked = true;
+            filter->sunglasses_locked_box = biggest;
+            VISION_LOG(LOG_INFO, "Face sunglasses target locked after 600 ms");
+        }
+    } else if (box_iou(filter->sunglasses_locked_box, biggest) >= target_iou) {
+        filter->sunglasses_locked_box = biggest;
+        filter->sunglasses_candidate_valid = false;
+    } else {
+        if (!filter->sunglasses_candidate_valid ||
+            box_iou(filter->sunglasses_candidate, biggest) < target_iou) {
+            filter->sunglasses_candidate = biggest;
+            filter->sunglasses_candidate_since = now;
+            filter->sunglasses_candidate_valid = true;
+        } else {
+            filter->sunglasses_candidate = biggest;
+        }
+
+        if (now - filter->sunglasses_candidate_since >= lock_delay) {
+            filter->sunglasses_locked_box = biggest;
+            filter->sunglasses_candidate_valid = false;
+            VISION_LOG(LOG_INFO, "Face sunglasses target switched after 600 ms");
+        }
+    }
+
+    if (!filter->sunglasses_locked)
+        return false;
+    target = filter->sunglasses_locked_box;
+    return true;
+}
+
+static bool update_pirate_hat_target(vision_filter_data *filter,
+                                     const std::vector<face_box> &faces,
+                                     face_box &target)
+{
+    if (!filter->pirate_hat_overlay || !detection_is_alive(filter) || faces.size() < 2) {
+        filter->pirate_hat_candidate_valid = false;
+        filter->pirate_hat_locked = false;
+        return false;
+    }
+
+    size_t largest = 0;
+    size_t second_largest = 1;
+    if (faces[second_largest].width * faces[second_largest].height >
+        faces[largest].width * faces[largest].height)
+        std::swap(largest, second_largest);
+    for (size_t i = 2; i < faces.size(); ++i) {
+        const float area = faces[i].width * faces[i].height;
+        const float second_area = faces[second_largest].width * faces[second_largest].height;
+        if (area > faces[largest].width * faces[largest].height) {
+            second_largest = largest;
+            largest = i;
+        } else if (area > second_area) {
+            second_largest = i;
+        }
+    }
+    const face_box second_face = faces[second_largest];
+    const auto now = std::chrono::steady_clock::now();
+    constexpr float target_iou = 0.25f;
+    constexpr auto lock_delay = std::chrono::milliseconds(600);
+
+    if (!filter->pirate_hat_locked) {
+        if (!filter->pirate_hat_candidate_valid ||
+            box_iou(filter->pirate_hat_candidate, second_face) < target_iou) {
+            filter->pirate_hat_candidate = second_face;
+            filter->pirate_hat_candidate_since = now;
+            filter->pirate_hat_candidate_valid = true;
+        } else {
+            filter->pirate_hat_candidate = second_face;
+        }
+        if (now - filter->pirate_hat_candidate_since >= lock_delay) {
+            filter->pirate_hat_locked = true;
+            filter->pirate_hat_locked_box = second_face;
+            VISION_LOG(LOG_INFO, "Face pirate hat target locked after 600 ms");
+        }
+    } else if (box_iou(filter->pirate_hat_locked_box, second_face) >= target_iou) {
+        filter->pirate_hat_locked_box = second_face;
+        filter->pirate_hat_candidate_valid = false;
+    } else {
+        if (!filter->pirate_hat_candidate_valid ||
+            box_iou(filter->pirate_hat_candidate, second_face) < target_iou) {
+            filter->pirate_hat_candidate = second_face;
+            filter->pirate_hat_candidate_since = now;
+            filter->pirate_hat_candidate_valid = true;
+        } else {
+            filter->pirate_hat_candidate = second_face;
+        }
+        if (now - filter->pirate_hat_candidate_since >= lock_delay) {
+            filter->pirate_hat_locked_box = second_face;
+            filter->pirate_hat_candidate_valid = false;
+            VISION_LOG(LOG_INFO, "Face pirate hat target switched after 600 ms");
+        }
+    }
+
+    if (!filter->pirate_hat_locked)
+        return false;
+    target = filter->pirate_hat_locked_box;
+    return true;
+}
+
+static bool update_clown_mask_target(vision_filter_data *filter,
+                                     const std::vector<face_box> &faces,
+                                     face_box &target)
+{
+    if (!filter->clown_mask_overlay || !detection_is_alive(filter) || faces.size() < 3) {
+        filter->clown_mask_candidate_valid = false;
+        filter->clown_mask_locked = false;
+        return false;
+    }
+
+    std::vector<face_box> sorted_faces = faces;
+    std::sort(sorted_faces.begin(), sorted_faces.end(), [](const face_box &a, const face_box &b) {
+        return a.width * a.height > b.width * b.height;
+    });
+    const face_box third_face = sorted_faces[2];
+    const auto now = std::chrono::steady_clock::now();
+    constexpr float target_iou = 0.25f;
+    constexpr auto lock_delay = std::chrono::milliseconds(600);
+
+    if (!filter->clown_mask_locked) {
+        if (!filter->clown_mask_candidate_valid ||
+            box_iou(filter->clown_mask_candidate, third_face) < target_iou) {
+            filter->clown_mask_candidate = third_face;
+            filter->clown_mask_candidate_since = now;
+            filter->clown_mask_candidate_valid = true;
+        } else {
+            filter->clown_mask_candidate = third_face;
+        }
+        if (now - filter->clown_mask_candidate_since >= lock_delay) {
+            filter->clown_mask_locked = true;
+            filter->clown_mask_locked_box = third_face;
+            VISION_LOG(LOG_INFO, "Face clown mask target locked after 600 ms");
+        }
+    } else if (box_iou(filter->clown_mask_locked_box, third_face) >= target_iou) {
+        filter->clown_mask_locked_box = third_face;
+        filter->clown_mask_candidate_valid = false;
+    } else {
+        if (!filter->clown_mask_candidate_valid ||
+            box_iou(filter->clown_mask_candidate, third_face) < target_iou) {
+            filter->clown_mask_candidate = third_face;
+            filter->clown_mask_candidate_since = now;
+            filter->clown_mask_candidate_valid = true;
+        } else {
+            filter->clown_mask_candidate = third_face;
+        }
+        if (now - filter->clown_mask_candidate_since >= lock_delay) {
+            filter->clown_mask_locked_box = third_face;
+            filter->clown_mask_candidate_valid = false;
+            VISION_LOG(LOG_INFO, "Face clown mask target switched after 600 ms");
+        }
+    }
+
+    if (!filter->clown_mask_locked)
+        return false;
+    target = filter->clown_mask_locked_box;
+    return true;
+}
+
+static void render_faces(vision_filter_data *filter, uint32_t source_width,
+                         uint32_t source_height)
 {
     std::vector<face_box> faces;
     {
@@ -501,7 +739,96 @@ static void render_faces(vision_filter_data *filter)
     }
 
     gs_effect_set_int(filter->face_count_param,
-                      filter->face_detection ? static_cast<int>(faces.size()) : 0);
+                      filter->face_detection && filter->show_face_boxes
+                          ? static_cast<int>(faces.size()) : 0);
+    struct vec4 sunglasses_box = {0.0f, 0.0f, 0.0f, 0.0f};
+    face_box target{};
+    if (filter->face_detection && filter->sunglasses_image_ready &&
+        update_sunglasses_target(filter, faces, target)) {
+        const float image_aspect = filter->sunglasses_image.cy > 0
+            ? static_cast<float>(filter->sunglasses_image.cx) /
+              static_cast<float>(filter->sunglasses_image.cy)
+            : 1.0f;
+        const float overlay_width = target.width;
+        const float overlay_height = overlay_width *
+            (static_cast<float>(source_width) / static_cast<float>(source_height)) /
+            image_aspect;
+        const float eye_y = filter->flip_analysis_vertical
+            ? 1.0f - target.eye_y
+            : target.eye_y;
+        sunglasses_box = {
+            target.x,
+            eye_y - overlay_height * 0.5f,
+            overlay_width,
+            overlay_height,
+        };
+    }
+    gs_effect_set_vec4(filter->sunglasses_box_param, &sunglasses_box);
+    gs_effect_set_float(filter->sunglasses_angle_param,
+                        target.angle);
+    gs_effect_set_texture(filter->sunglasses_image_param,
+                          filter->sunglasses_image.texture);
+
+    struct vec4 pirate_hat_box = {0.0f, 0.0f, 0.0f, 0.0f};
+    float pirate_hat_angle = 0.0f;
+    face_box hat_target{};
+    if (filter->face_detection && filter->pirate_hat_image_ready &&
+        update_pirate_hat_target(filter, faces, hat_target)) {
+        const face_box &target = hat_target;
+        const float image_aspect = filter->pirate_hat_image.cy > 0
+            ? static_cast<float>(filter->pirate_hat_image.cx) /
+              static_cast<float>(filter->pirate_hat_image.cy)
+            : 1.0f;
+        const float hat_width = target.width * 2.00f;
+        const float hat_height = hat_width *
+            (static_cast<float>(source_width) / static_cast<float>(source_height)) /
+            image_aspect;
+        const float target_y = filter->flip_analysis_vertical
+            ? 1.0f - (target.y + target.height)
+            : target.y;
+        pirate_hat_box = {
+            target.x - (hat_width - target.width) * 0.5f,
+            target_y - hat_height * 0.58f,
+            hat_width,
+            hat_height,
+        };
+        pirate_hat_angle = target.angle;
+    }
+    gs_effect_set_vec4(filter->pirate_hat_box_param, &pirate_hat_box);
+    gs_effect_set_float(filter->pirate_hat_angle_param, pirate_hat_angle);
+    gs_effect_set_texture(filter->pirate_hat_image_param,
+                          filter->pirate_hat_image.texture);
+
+    struct vec4 clown_mask_box = {0.0f, 0.0f, 0.0f, 0.0f};
+    float clown_mask_angle = 0.0f;
+    face_box mask_target{};
+    if (filter->face_detection && filter->clown_mask_image_ready &&
+        update_clown_mask_target(filter, faces, mask_target)) {
+        const float image_aspect = filter->clown_mask_image.cy > 0
+            ? static_cast<float>(filter->clown_mask_image.cx) /
+              static_cast<float>(filter->clown_mask_image.cy)
+            : 1.0f;
+        const float mask_width = mask_target.width * 1.35f;
+        const float mask_height = mask_width *
+            (static_cast<float>(source_width) / static_cast<float>(source_height)) /
+            image_aspect;
+        const float target_y = filter->flip_analysis_vertical
+            ? 1.0f - (mask_target.y + mask_target.height)
+            : mask_target.y;
+        const float center_x = mask_target.x + mask_target.width * 0.5f;
+        const float center_y = target_y + mask_target.height * 0.5f;
+        clown_mask_box = {
+            center_x - mask_width * 0.5f,
+            center_y - mask_height * 0.5f,
+            mask_width,
+            mask_height,
+        };
+        clown_mask_angle = mask_target.angle;
+    }
+    gs_effect_set_vec4(filter->clown_mask_box_param, &clown_mask_box);
+    gs_effect_set_float(filter->clown_mask_angle_param, clown_mask_angle);
+    gs_effect_set_texture(filter->clown_mask_image_param,
+                          filter->clown_mask_image.texture);
     for (size_t i = 0; i < MAX_FACE_BOXES; ++i) {
         struct vec4 box = {0.0f, 0.0f, 0.0f, 0.0f};
         if (i < faces.size()) {
@@ -579,12 +906,12 @@ static void refresh_capture_window(vision_filter_data *filter, obs_source_t *par
         filter->capture_selection = value ? value : "";
     }
     if (window_id != previous || previous == 0) {
-        blog(LOG_INFO, "Face capture_window raw='%s' parsed_decimal=%llu parsed_hex=0x%llx",
+        VISION_LOG(LOG_INFO, "Face capture_window raw='%s' parsed_decimal=%llu parsed_hex=0x%llx",
              raw.c_str(), static_cast<unsigned long long>(window_id),
              static_cast<unsigned long long>(window_id));
     }
     if (window_id != previous)
-        blog(LOG_INFO, "Face XComposite capture window changed from %llu to %llu",
+        VISION_LOG(LOG_INFO, "Face XComposite capture window changed from %llu to %llu",
              static_cast<unsigned long long>(previous),
              static_cast<unsigned long long>(window_id));
 }
@@ -604,7 +931,7 @@ static void x11_capture_loop(vision_filter_data *filter)
             if (capture.capture(selection, bgr)) {
                 ++filter->capture_successes;
                 if (filter->capture_successes == 1 || filter->capture_successes % 30 == 0)
-                    blog(LOG_INFO, "Face XComposite capture success resolved_window=0x%llx frame=%llu size=%dx%d path=%s attempts=%llu failures=%llu",
+                    VISION_LOG(LOG_INFO, "Face XComposite capture success resolved_window=0x%llx frame=%llu size=%dx%d path=%s attempts=%llu failures=%llu",
                          static_cast<unsigned long long>(capture.resolved_window_id()),
                          static_cast<unsigned long long>(filter->capture_successes),
                          bgr.cols, bgr.rows,
@@ -622,7 +949,7 @@ static void x11_capture_loop(vision_filter_data *filter)
                 if (left >= 0 && top >= 0 && crop_width > 0 && crop_height > 0 &&
                     (left != 0 || top != 0 || right != 0 || crop_height != bgr.rows)) {
                     if (!filter->crop_logged) {
-                        blog(LOG_INFO, "Face source crop full=%dx%d rect=%d,%d %dx%d",
+                        VISION_LOG(LOG_INFO, "Face source crop full=%dx%d rect=%d,%d %dx%d",
                              bgr.cols, bgr.rows, left, top, crop_width, crop_height);
                         filter->crop_logged = true;
                     }
@@ -639,7 +966,7 @@ static void x11_capture_loop(vision_filter_data *filter)
             } else {
                 ++filter->capture_failures;
                 if (filter->capture_failures == 1 || filter->capture_failures % 30 == 0)
-                    blog(LOG_WARNING, "Face XComposite capture failed requested_window=%llu attempts=%llu successes=%llu failures=%llu reason='%s'",
+                    VISION_LOG(LOG_WARNING, "Face XComposite capture failed requested_window=%llu attempts=%llu successes=%llu failures=%llu reason='%s'",
                          static_cast<unsigned long long>(filter->capture_window_id.load()),
                          static_cast<unsigned long long>(filter->capture_attempts),
                          static_cast<unsigned long long>(filter->capture_successes),
@@ -658,7 +985,7 @@ static void submit_detection_bgr(vision_filter_data *filter, cv::Mat bgr)
         return;
 
     if (!filter->first_frame_logged) {
-        blog(LOG_INFO, "Face detection received dynamic XComposite %ux%u BGR frames",
+        VISION_LOG(LOG_INFO, "Face detection received dynamic XComposite %ux%u BGR frames",
              bgr.cols, bgr.rows);
         filter->first_frame_logged = true;
     }
@@ -678,13 +1005,13 @@ static void log_source_chain_once(vision_filter_data *filter, obs_source_t *pare
     if (filter->source_chain_logged || !parent)
         return;
     filter->source_chain_logged = true;
-    blog(LOG_INFO, "Face debug parent source='%s' id='%s' base=%ux%u filters=%zu",
+    VISION_LOG(LOG_INFO, "Face debug parent source='%s' id='%s' base=%ux%u filters=%zu",
          obs_source_get_name(parent), obs_source_get_id(parent),
          obs_source_get_base_width(parent), obs_source_get_base_height(parent),
          obs_source_filter_count(parent));
     obs_data_t *settings = obs_source_get_settings(parent);
     if (settings) {
-        blog(LOG_INFO, "Face debug parent settings=%s", obs_data_get_json(settings));
+        VISION_LOG(LOG_INFO, "Face debug parent settings=%s", obs_data_get_json(settings));
         obs_data_release(settings);
     }
 }
@@ -701,7 +1028,8 @@ static void face_render(void *data, gs_effect_t *)
     refresh_capture_window(filter, parent);
 
     ++filter->frame_counter;
-    render_faces(filter);
+    render_faces(filter, obs_source_get_base_width(parent),
+                 obs_source_get_base_height(parent));
     obs_source_process_filter_end(filter->source, filter->effect, 0, 0);
 }
 
@@ -716,6 +1044,11 @@ static void filter_destroy(void *data)
         filter->detector_thread.join();
 
     obs_enter_graphics();
+    if (filter->face_only) {
+        gs_image_file_free(&filter->sunglasses_image);
+        gs_image_file_free(&filter->pirate_hat_image);
+        gs_image_file_free(&filter->clown_mask_image);
+    }
     gs_effect_destroy(filter->effect);
     obs_leave_graphics();
     delete filter;
@@ -731,6 +1064,9 @@ static void *filter_create(obs_data_t *settings, obs_source_t *source,
     std::string effect_relative = std::string("effects/") + effect_name;
     char *effect_path = obs_module_file(effect_relative.c_str());
     char *model_path = face_only ? obs_module_file("models/face_detection_yunet_2026may.onnx") : nullptr;
+    char *sunglasses_path = face_only ? obs_module_file("images/sunglasses.png") : nullptr;
+    char *pirate_hat_path = face_only ? obs_module_file("images/pirate_hat.png") : nullptr;
+    char *clown_mask_path = face_only ? obs_module_file("images/clown_mask.png") : nullptr;
     char *error = nullptr;
 
     obs_enter_graphics();
@@ -738,22 +1074,58 @@ static void *filter_create(obs_data_t *settings, obs_source_t *source,
     obs_leave_graphics();
 
     if (!filter->effect) {
-        blog(LOG_ERROR, "Could not load effect: %s", error ? error : effect_path);
+        VISION_LOG(LOG_ERROR, "Could not load effect: %s", error ? error : effect_path);
         bfree(error);
         bfree(effect_path);
         bfree(model_path);
+        bfree(sunglasses_path);
+        bfree(pirate_hat_path);
+        bfree(clown_mask_path);
         delete filter;
         return nullptr;
     }
 
     if (face_only) {
+        gs_image_file_init(&filter->sunglasses_image, sunglasses_path);
+        obs_enter_graphics();
+        gs_image_file_init_texture(&filter->sunglasses_image);
+        obs_leave_graphics();
+        filter->sunglasses_image_ready = filter->sunglasses_image.loaded &&
+                                          filter->sunglasses_image.texture != nullptr;
+        if (!filter->sunglasses_image_ready)
+            VISION_LOG(LOG_WARNING, "Could not load sunglasses overlay: %s", sunglasses_path);
+        else
+            VISION_LOG(LOG_INFO, "Loaded sunglasses overlay texture %ux%u",
+                 filter->sunglasses_image.cx, filter->sunglasses_image.cy);
+        gs_image_file_init(&filter->pirate_hat_image, pirate_hat_path);
+        obs_enter_graphics();
+        gs_image_file_init_texture(&filter->pirate_hat_image);
+        obs_leave_graphics();
+        filter->pirate_hat_image_ready = filter->pirate_hat_image.loaded &&
+                                          filter->pirate_hat_image.texture != nullptr;
+        if (!filter->pirate_hat_image_ready)
+            VISION_LOG(LOG_WARNING, "Could not load pirate hat overlay: %s", pirate_hat_path);
+        else
+            VISION_LOG(LOG_INFO, "Loaded pirate hat overlay texture %ux%u",
+                 filter->pirate_hat_image.cx, filter->pirate_hat_image.cy);
+        gs_image_file_init(&filter->clown_mask_image, clown_mask_path);
+        obs_enter_graphics();
+        gs_image_file_init_texture(&filter->clown_mask_image);
+        obs_leave_graphics();
+        filter->clown_mask_image_ready = filter->clown_mask_image.loaded &&
+                                          filter->clown_mask_image.texture != nullptr;
+        if (!filter->clown_mask_image_ready)
+            VISION_LOG(LOG_WARNING, "Could not load clown mask overlay: %s", clown_mask_path);
+        else
+            VISION_LOG(LOG_INFO, "Loaded clown mask overlay texture %ux%u",
+                 filter->clown_mask_image.cx, filter->clown_mask_image.cy);
         filter->face_detector = cv::FaceDetectorYN::create(
             model_path, "", cv::Size(320, 320), 0.35f, 0.3f, 5000);
         filter->face_detector_ready = !filter->face_detector.empty();
         if (!filter->face_detector_ready)
-            blog(LOG_WARNING, "Could not load face model: %s", model_path);
+            VISION_LOG(LOG_WARNING, "Could not load face model: %s", model_path);
         else
-            blog(LOG_INFO, "Face detection filter loaded YuNet model");
+            VISION_LOG(LOG_INFO, "Face detection filter loaded YuNet model");
     }
 
     filter->threshold_param = gs_effect_get_param_by_name(filter->effect, "threshold");
@@ -769,6 +1141,15 @@ static void *filter_create(obs_data_t *settings, obs_source_t *source,
 
     filter->face_box_color_param = gs_effect_get_param_by_name(filter->effect, "face_box_color");
     filter->face_box_width_param = gs_effect_get_param_by_name(filter->effect, "face_box_width");
+    filter->sunglasses_box_param = gs_effect_get_param_by_name(filter->effect, "sunglasses_box");
+    filter->sunglasses_angle_param = gs_effect_get_param_by_name(filter->effect, "sunglasses_angle");
+    filter->sunglasses_image_param = gs_effect_get_param_by_name(filter->effect, "sunglasses_image");
+    filter->pirate_hat_box_param = gs_effect_get_param_by_name(filter->effect, "pirate_hat_box");
+    filter->pirate_hat_angle_param = gs_effect_get_param_by_name(filter->effect, "pirate_hat_angle");
+    filter->pirate_hat_image_param = gs_effect_get_param_by_name(filter->effect, "pirate_hat_image");
+    filter->clown_mask_box_param = gs_effect_get_param_by_name(filter->effect, "clown_mask_box");
+    filter->clown_mask_angle_param = gs_effect_get_param_by_name(filter->effect, "clown_mask_angle");
+    filter->clown_mask_image_param = gs_effect_get_param_by_name(filter->effect, "clown_mask_image");
 
     for (size_t i = 0; i < MAX_FACE_BOXES; ++i) {
         const std::string name = "face_box" + std::to_string(i);
@@ -778,6 +1159,9 @@ static void *filter_create(obs_data_t *settings, obs_source_t *source,
 
     bfree(effect_path);
     bfree(model_path);
+    bfree(sunglasses_path);
+    bfree(pirate_hat_path);
+    bfree(clown_mask_path);
     if (face_only) {
         face_update(filter, settings);
         filter->detector_thread = std::thread(detector_loop, filter);
