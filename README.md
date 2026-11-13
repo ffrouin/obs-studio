@@ -39,7 +39,7 @@ Do not install over the system OBS installation from this prototype. Copy the st
 The plugin registers two independent OBS filters:
 
 - **Vision contour filter** — GPU contour detection and comic colorization.
-- **Face detection filter** — asynchronous YuNet face detection with optional green face-detection rectangles and three configurable overlay slots for the biggest, second-biggest, and third-biggest faces. Each slot can select sunglasses, pirate hat, clown mask, or none. The rectangle display can be disabled in the filter properties. Sunglasses, the hat, and the clown mask are disabled by default. Overlay targets lock or switch after 600 ms of stability.
+- **Face detection filter** — asynchronous YuNet face detection with optional green face-detection rectangles, three configurable overlay slots for the biggest, second-biggest, and third-biggest faces, and optional facial-expression emoji analysis on up to the ten biggest faces. The expression model supports neutral, happy, surprised, sad, angry, disgust, fearful, and contempt. Each decorative slot can select sunglasses, pirate hat, clown mask, or none. Expression emoji are rendered above the face, not over it, and require the configured confidence threshold. The rectangle display and emotion overlay can be disabled in the filter properties. Sunglasses, the hat, the clown mask, and emotion emoji are disabled by default. Overlay targets lock or switch after 600 ms of stability.
 
 The XComposite resolver accepts the stable static X11 name `chromium-obs-studio` in either the window title or WM_CLASS resource/class fields, so tab-dependent Chromium titles do not need to remain fixed.
 ## Deployment script

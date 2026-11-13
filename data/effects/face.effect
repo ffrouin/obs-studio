@@ -9,6 +9,8 @@ uniform float4 face_box4;
 uniform float4 face_box5;
 uniform float4 face_box6;
 uniform float4 face_box7;
+uniform float4 face_box8;
+uniform float4 face_box9;
 
 uniform float4 face_box_color;
 uniform float face_box_width;
@@ -21,6 +23,27 @@ uniform texture2d pirate_hat_image;
 uniform float4 clown_mask_box;
 uniform float clown_mask_angle;
 uniform texture2d clown_mask_image;
+uniform texture2d emotion_image;
+uniform float4 emotion_box0;
+uniform float4 emotion_box1;
+uniform float4 emotion_box2;
+uniform float4 emotion_uv0;
+uniform float4 emotion_uv1;
+uniform float4 emotion_uv2;
+uniform float4 emotion_box3;
+uniform float4 emotion_box4;
+uniform float4 emotion_box5;
+uniform float4 emotion_box6;
+uniform float4 emotion_box7;
+uniform float4 emotion_box8;
+uniform float4 emotion_box9;
+uniform float4 emotion_uv3;
+uniform float4 emotion_uv4;
+uniform float4 emotion_uv5;
+uniform float4 emotion_uv6;
+uniform float4 emotion_uv7;
+uniform float4 emotion_uv8;
+uniform float4 emotion_uv9;
 
 sampler_state linear_sampler {
     Filter = Linear;
@@ -59,6 +82,19 @@ float2 rotated_image_uv(float2 uv, float4 box, float angle)
     return rotated / box.zw + float2(0.5, 0.5);
 }
 
+void blend_emotion(inout float3 result, float2 uv, float4 box, float4 atlas_rect)
+{
+    if (box.z <= 0.0 || box.w <= 0.0)
+        return;
+    float2 local_uv = (uv - box.xy) / box.zw;
+    if (local_uv.x < 0.0 || local_uv.x > 1.0 ||
+        local_uv.y < 0.0 || local_uv.y > 1.0)
+        return;
+    float2 atlas_uv = atlas_rect.xy + local_uv * atlas_rect.zw;
+    float4 emoji = emotion_image.Sample(linear_sampler, atlas_uv);
+    result = lerp(result, emoji.rgb, emoji.a);
+}
+
 float4 PSFace(VertData v) : TARGET
 {
     float4 original = image.Sample(linear_sampler, v.uv);
@@ -91,6 +127,17 @@ float4 PSFace(VertData v) : TARGET
         }
     }
 
+    blend_emotion(result, v.uv, emotion_box0, emotion_uv0);
+    blend_emotion(result, v.uv, emotion_box1, emotion_uv1);
+    blend_emotion(result, v.uv, emotion_box2, emotion_uv2);
+    blend_emotion(result, v.uv, emotion_box3, emotion_uv3);
+    blend_emotion(result, v.uv, emotion_box4, emotion_uv4);
+    blend_emotion(result, v.uv, emotion_box5, emotion_uv5);
+    blend_emotion(result, v.uv, emotion_box6, emotion_uv6);
+    blend_emotion(result, v.uv, emotion_box7, emotion_uv7);
+    blend_emotion(result, v.uv, emotion_box8, emotion_uv8);
+    blend_emotion(result, v.uv, emotion_box9, emotion_uv9);
+
 
     if (face_count > 0 && on_face_box(v.uv, face_box0)) result = face_box_color.rgb;
     if (face_count > 1 && on_face_box(v.uv, face_box1)) result = face_box_color.rgb;
@@ -100,6 +147,8 @@ float4 PSFace(VertData v) : TARGET
     if (face_count > 5 && on_face_box(v.uv, face_box5)) result = face_box_color.rgb;
     if (face_count > 6 && on_face_box(v.uv, face_box6)) result = face_box_color.rgb;
     if (face_count > 7 && on_face_box(v.uv, face_box7)) result = face_box_color.rgb;
+    if (face_count > 8 && on_face_box(v.uv, face_box8)) result = face_box_color.rgb;
+    if (face_count > 9 && on_face_box(v.uv, face_box9)) result = face_box_color.rgb;
 
     return float4(result, original.a);
 }

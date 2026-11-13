@@ -13,11 +13,12 @@ pkg_check_modules(X11_CAPTURE REQUIRED x11 xcomposite xext)
 find_path(OPENCV_INCLUDE_DIR opencv2/core.hpp
     PATHS /usr/include/opencv5 /usr/local/include/opencv5)
 find_library(OPENCV_CORE_LIBRARY NAMES opencv_core PATHS /usr/lib /usr/local/lib)
+find_library(OPENCV_DNN_LIBRARY NAMES opencv_dnn PATHS /usr/lib /usr/local/lib)
 find_library(OPENCV_IMGPROC_LIBRARY NAMES opencv_imgproc PATHS /usr/lib /usr/local/lib)
 find_library(OPENCV_OBJDETECT_LIBRARY NAMES opencv_objdetect PATHS /usr/lib /usr/local/lib)
 find_library(OPENCV_VIDEO_LIBRARY NAMES opencv_video PATHS /usr/lib /usr/local/lib)
 
-if (NOT OPENCV_INCLUDE_DIR OR NOT OPENCV_CORE_LIBRARY OR
+if (NOT OPENCV_INCLUDE_DIR OR NOT OPENCV_CORE_LIBRARY OR NOT OPENCV_DNN_LIBRARY OR
     NOT OPENCV_IMGPROC_LIBRARY OR NOT OPENCV_OBJDETECT_LIBRARY OR
     NOT OPENCV_VIDEO_LIBRARY)
     message(FATAL_ERROR "OpenCV core, imgproc, and objdetect development files are required")
@@ -37,6 +38,7 @@ target_link_directories(obs-vision-filter PRIVATE ${LIBOBS_LIBRARY_DIRS})
 target_link_libraries(obs-vision-filter PRIVATE
     ${LIBOBS_LIBRARIES}
     ${OPENCV_CORE_LIBRARY}
+    ${OPENCV_DNN_LIBRARY}
     ${OPENCV_IMGPROC_LIBRARY}
     ${OPENCV_OBJDETECT_LIBRARY}
     ${OPENCV_VIDEO_LIBRARY}

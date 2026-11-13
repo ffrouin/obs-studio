@@ -8,6 +8,7 @@
 #include "x11-capture.hpp"
 
 #include <opencv2/imgproc.hpp>
+#include <opencv2/dnn.hpp>
 #include <opencv2/objdetect/face.hpp>
 #include <opencv2/video/tracking.hpp>
 
@@ -21,6 +22,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <mutex>
+#include <numeric>
 #include <string>
 #include <thread>
 #include <vector>
@@ -35,7 +37,7 @@
 #endif
 
 namespace {
-constexpr size_t MAX_FACE_BOXES = 8;
+constexpr size_t MAX_FACE_BOXES = 10;
 
 struct face_box {
     float x;
@@ -45,6 +47,8 @@ struct face_box {
     float angle = 0.0f;
     float eye_y = 0.0f;
     float nose_x = 0.0f;
+    std::array<float, 10> landmarks{};
+    std::array<float, 8> emotion_scores{};
 };
 
 struct face_track {
@@ -82,6 +86,9 @@ struct vision_filter_data {
     gs_eparam_t *clown_mask_box_param = nullptr;
     gs_eparam_t *clown_mask_angle_param = nullptr;
     gs_eparam_t *clown_mask_image_param = nullptr;
+    gs_eparam_t *emotion_image_param = nullptr;
+    std::array<gs_eparam_t *, 10> emotion_box_params{};
+    std::array<gs_eparam_t *, 10> emotion_uv_params{};
     std::array<gs_eparam_t *, MAX_FACE_BOXES> face_box_params{};
 
     double threshold = 0.20;
@@ -107,6 +114,10 @@ struct vision_filter_data {
     bool sunglasses_overlay = false;
     bool pirate_hat_overlay = false;
     bool clown_mask_overlay = false;
+    bool emotion_overlay = false;
+    double emotion_min_confidence = 0.55;
+    gs_image_file_t emotion_image{};
+    bool emotion_image_ready = false;
     std::array<int, 3> overlay_slots = {1, 2, 3};
     gs_image_file_t sunglasses_image{};
     gs_image_file_t pirate_hat_image{};
@@ -155,6 +166,8 @@ struct vision_filter_data {
     bool crop_logged = false;
     cv::Ptr<cv::FaceDetectorYN> face_detector;
     bool face_detector_ready = false;
+    cv::dnn::Net emotion_net;
+    bool emotion_net_ready = false;
 
     uint64_t frame_counter = 0;
     std::atomic<uint64_t> submitted_frames{0};
@@ -206,6 +219,8 @@ static void face_defaults(obs_data_t *settings)
     obs_data_set_bool(settings, "sunglasses_overlay", false);
     obs_data_set_bool(settings, "pirate_hat_overlay", false);
     obs_data_set_bool(settings, "clown_mask_overlay", false);
+    obs_data_set_bool(settings, "emotion_overlay", false);
+    obs_data_set_double(settings, "emotion_min_confidence", 0.55);
     obs_data_set_int(settings, "overlay_slot_1", 1);
     obs_data_set_int(settings, "overlay_slot_2", 2);
     obs_data_set_int(settings, "overlay_slot_3", 3);
@@ -243,6 +258,10 @@ static obs_properties_t *face_properties(void *)
     obs_properties_add_bool(props, "sunglasses_overlay", obs_module_text("SunglassesOverlay"));
     obs_properties_add_bool(props, "pirate_hat_overlay", obs_module_text("PirateHatOverlay"));
     obs_properties_add_bool(props, "clown_mask_overlay", obs_module_text("ClownMaskOverlay"));
+    obs_properties_add_bool(props, "emotion_overlay", obs_module_text("EmotionOverlay"));
+    obs_properties_add_float_slider(props, "emotion_min_confidence",
+                                    obs_module_text("EmotionMinConfidence"),
+                                    0.30, 0.90, 0.05);
     for (int slot = 1; slot <= 3; ++slot) {
         const std::string name = "overlay_slot_" + std::to_string(slot);
         obs_property_t *list = obs_properties_add_list(
@@ -287,6 +306,8 @@ static void face_update(void *data, obs_data_t *settings)
     filter->sunglasses_overlay = obs_data_get_bool(settings, "sunglasses_overlay");
     filter->pirate_hat_overlay = obs_data_get_bool(settings, "pirate_hat_overlay");
     filter->clown_mask_overlay = obs_data_get_bool(settings, "clown_mask_overlay");
+    filter->emotion_overlay = obs_data_get_bool(settings, "emotion_overlay");
+    filter->emotion_min_confidence = obs_data_get_double(settings, "emotion_min_confidence");
     for (size_t i = 0; i < filter->overlay_slots.size(); ++i) {
         const std::string name = "overlay_slot_" + std::to_string(i + 1);
         filter->overlay_slots[i] = static_cast<int>(obs_data_get_int(settings, name.c_str()));
@@ -337,15 +358,18 @@ static std::vector<face_box> update_tracks(std::vector<face_track> &tracks,
                 (target.width - track.box.width) * 0.5f,
                 (target.height - track.box.height) * 0.5f,
             };
-            track.box = {
-                track.box.x + (target.x - track.box.x) * alpha,
-                track.box.y + (target.y - track.box.y) * alpha,
-                track.box.width + (target.width - track.box.width) * alpha,
-                track.box.height + (target.height - track.box.height) * alpha,
-                track.box.angle + (target.angle - track.box.angle) * alpha,
-                track.box.eye_y + (target.eye_y - track.box.eye_y) * alpha,
-                track.box.nose_x + (target.nose_x - track.box.nose_x) * alpha,
-            };
+            track.box.x += (target.x - track.box.x) * alpha;
+            track.box.y += (target.y - track.box.y) * alpha;
+            track.box.width += (target.width - track.box.width) * alpha;
+            track.box.height += (target.height - track.box.height) * alpha;
+            track.box.angle += (target.angle - track.box.angle) * alpha;
+            track.box.eye_y += (target.eye_y - track.box.eye_y) * alpha;
+            track.box.nose_x += (target.nose_x - track.box.nose_x) * alpha;
+            for (size_t i = 0; i < track.box.landmarks.size(); ++i)
+                track.box.landmarks[i] += (target.landmarks[i] - track.box.landmarks[i]) * alpha;
+            for (size_t i = 0; i < track.box.emotion_scores.size(); ++i)
+                track.box.emotion_scores[i] +=
+                    (target.emotion_scores[i] - track.box.emotion_scores[i]) * alpha;
             track.missed = 0;
             used[best_index] = true;
         } else {
@@ -380,6 +404,46 @@ static std::vector<face_box> update_tracks(std::vector<face_track> &tracks,
         result.push_back(track.box);
     }
     return result;
+}
+
+static std::array<float, 8> infer_emotion(vision_filter_data *filter,
+                                          const cv::Mat &bgr,
+                                          const face_box &face)
+{
+    std::array<float, 8> scores{};
+    if (!filter->emotion_net_ready || bgr.empty())
+        return scores;
+
+    const int left = std::clamp(static_cast<int>(face.x * bgr.cols), 0, bgr.cols - 1);
+    const int top = std::clamp(static_cast<int>(face.y * bgr.rows), 0, bgr.rows - 1);
+    const int width = std::max(1, std::min(static_cast<int>(face.width * bgr.cols), bgr.cols - left));
+    const int height = std::max(1, std::min(static_cast<int>(face.height * bgr.rows), bgr.rows - top));
+    cv::Mat aligned;
+    cv::resize(bgr(cv::Rect(left, top, width, height)), aligned, cv::Size(112, 112));
+
+    cv::Mat gray;
+    cv::cvtColor(aligned, gray, cv::COLOR_BGR2GRAY);
+    cv::Mat blob = cv::dnn::blobFromImage(gray, 1.0,
+                                          cv::Size(64, 64),
+                                          cv::Scalar(), false, false,
+                                          CV_32F);
+    filter->emotion_net.setInput(blob);
+    const cv::Mat output = filter->emotion_net.forward();
+    if (output.total() < scores.size())
+        return scores;
+    const float *values = output.ptr<float>();
+    float maximum = values[0];
+    for (size_t i = 1; i < scores.size(); ++i)
+        maximum = std::max(maximum, values[i]);
+    float sum = 0.0f;
+    for (size_t i = 0; i < scores.size(); ++i) {
+        scores[i] = std::exp(values[i] - maximum);
+        sum += scores[i];
+    }
+    if (sum > 0.0f)
+        for (float &score : scores)
+            score /= sum;
+    return scores;
 }
 
 static void detector_loop(vision_filter_data *filter)
@@ -509,11 +573,28 @@ static void detector_loop(vision_filter_data *filter)
                         ((right_eye_y + left_eye_y) * 0.5f) / bgr.rows, 0.0f, 1.0f);
                     const float normalized_nose_x = std::clamp(
                         nose_x / bgr.cols, 0.0f, 1.0f);
-                    normalized.push_back({nx, ny, nw, nh, angle, eye_y,
-                                          normalized_nose_x});
+                    face_box box{nx, ny, nw, nh, angle, eye_y, normalized_nose_x};
+                    for (size_t landmark = 0; landmark < box.landmarks.size(); ++landmark)
+                        box.landmarks[landmark] = std::clamp(
+                            detected.at<float>(row, 4 + static_cast<int>(landmark)) /
+                                (landmark % 2 == 0 ? bgr.cols : bgr.rows),
+                            0.0f, 1.0f);
+                    normalized.push_back(box);
                     ++filter->accepted_detections;
                 }
             }
+        }
+
+        if (filter->emotion_overlay && filter->emotion_net_ready && !normalized.empty()) {
+            std::vector<size_t> ranked(normalized.size());
+            std::iota(ranked.begin(), ranked.end(), 0);
+            std::sort(ranked.begin(), ranked.end(), [&normalized](size_t a, size_t b) {
+                return normalized[a].width * normalized[a].height >
+                       normalized[b].width * normalized[b].height;
+            });
+            for (size_t i = 0; i < std::min<size_t>(10, ranked.size()); ++i)
+                normalized[ranked[i]].emotion_scores =
+                    infer_emotion(filter, bgr, normalized[ranked[i]]);
         }
 
         std::vector<face_box> tracked;
@@ -574,6 +655,15 @@ static size_t configured_overlay_rank(const vision_filter_data *filter, int over
             return rank;
     }
     return MAX_FACE_BOXES;
+}
+
+static int dominant_emotion(const face_box &face, float minimum_confidence)
+{
+    const auto best = std::max_element(face.emotion_scores.begin(),
+                                       face.emotion_scores.end());
+    if (best == face.emotion_scores.end() || *best < minimum_confidence)
+        return -1;
+    return static_cast<int>(std::distance(face.emotion_scores.begin(), best));
 }
 
 static bool update_sunglasses_target(vision_filter_data *filter,
@@ -861,6 +951,36 @@ static void render_faces(vision_filter_data *filter, uint32_t source_width,
     gs_effect_set_float(filter->clown_mask_angle_param, clown_mask_angle);
     gs_effect_set_texture(filter->clown_mask_image_param,
                           filter->clown_mask_image.texture);
+
+    gs_effect_set_texture(filter->emotion_image_param, filter->emotion_image.texture);
+    std::vector<size_t> emotion_ranks(faces.size());
+    std::iota(emotion_ranks.begin(), emotion_ranks.end(), 0);
+    std::sort(emotion_ranks.begin(), emotion_ranks.end(), [&faces](size_t a, size_t b) {
+        return faces[a].width * faces[a].height > faces[b].width * faces[b].height;
+    });
+    for (size_t slot = 0; slot < 10; ++slot) {
+        struct vec4 box = {0.0f, 0.0f, 0.0f, 0.0f};
+        struct vec4 atlas_rect = {0.0f, 0.0f, 0.0f, 0.0f};
+        if (filter->emotion_overlay && filter->emotion_image_ready &&
+            detection_is_alive(filter) && slot < emotion_ranks.size()) {
+            const face_box &face = faces[emotion_ranks[slot]];
+            const int emotion = dominant_emotion(
+                face, static_cast<float>(filter->emotion_min_confidence));
+            if (emotion >= 0) {
+                const float emoji_width = face.width * 0.55f;
+                const float emoji_height = emoji_width *
+                    (static_cast<float>(source_width) / static_cast<float>(source_height));
+                const float center_x = face.x + face.width * 0.5f;
+                const float y = std::max(0.0f, face.y - emoji_height - face.height * 0.04f);
+                box = {center_x - emoji_width * 0.5f, y, emoji_width, emoji_height};
+                atlas_rect = {static_cast<float>(emotion) / 8.0f, 0.0f,
+                              1.0f / 8.0f, 1.0f};
+            }
+        }
+        gs_effect_set_vec4(filter->emotion_box_params[slot], &box);
+        gs_effect_set_vec4(filter->emotion_uv_params[slot], &atlas_rect);
+    }
+
     for (size_t i = 0; i < MAX_FACE_BOXES; ++i) {
         struct vec4 box = {0.0f, 0.0f, 0.0f, 0.0f};
         if (i < faces.size()) {
@@ -1080,6 +1200,7 @@ static void filter_destroy(void *data)
         gs_image_file_free(&filter->sunglasses_image);
         gs_image_file_free(&filter->pirate_hat_image);
         gs_image_file_free(&filter->clown_mask_image);
+        gs_image_file_free(&filter->emotion_image);
     }
     gs_effect_destroy(filter->effect);
     obs_leave_graphics();
@@ -1099,6 +1220,9 @@ static void *filter_create(obs_data_t *settings, obs_source_t *source,
     char *sunglasses_path = face_only ? obs_module_file("images/sunglasses.png") : nullptr;
     char *pirate_hat_path = face_only ? obs_module_file("images/pirate_hat.png") : nullptr;
     char *clown_mask_path = face_only ? obs_module_file("images/clown_mask.png") : nullptr;
+    char *emotion_image_path = face_only ? obs_module_file("images/emotion_emoji_atlas.png") : nullptr;
+    char *emotion_model_path = face_only ? obs_module_file(
+        "models/emotion-ferplus-8.onnx") : nullptr;
     char *error = nullptr;
 
     obs_enter_graphics();
@@ -1113,6 +1237,8 @@ static void *filter_create(obs_data_t *settings, obs_source_t *source,
         bfree(sunglasses_path);
         bfree(pirate_hat_path);
         bfree(clown_mask_path);
+        bfree(emotion_image_path);
+        bfree(emotion_model_path);
         delete filter;
         return nullptr;
     }
@@ -1151,6 +1277,18 @@ static void *filter_create(obs_data_t *settings, obs_source_t *source,
         else
             VISION_LOG(LOG_INFO, "Loaded clown mask overlay texture %ux%u",
                  filter->clown_mask_image.cx, filter->clown_mask_image.cy);
+        gs_image_file_init(&filter->emotion_image, emotion_image_path);
+        obs_enter_graphics();
+        gs_image_file_init_texture(&filter->emotion_image);
+        obs_leave_graphics();
+        filter->emotion_image_ready = filter->emotion_image.loaded &&
+                                      filter->emotion_image.texture != nullptr;
+        try {
+            filter->emotion_net = cv::dnn::readNet(emotion_model_path);
+        } catch (const cv::Exception &error) {
+            VISION_LOG(LOG_WARNING, "Could not load emotion model: %s", error.what());
+        }
+        filter->emotion_net_ready = !filter->emotion_net.empty();
         filter->face_detector = cv::FaceDetectorYN::create(
             model_path, "", cv::Size(320, 320), 0.35f, 0.3f, 5000);
         filter->face_detector_ready = !filter->face_detector.empty();
@@ -1182,6 +1320,13 @@ static void *filter_create(obs_data_t *settings, obs_source_t *source,
     filter->clown_mask_box_param = gs_effect_get_param_by_name(filter->effect, "clown_mask_box");
     filter->clown_mask_angle_param = gs_effect_get_param_by_name(filter->effect, "clown_mask_angle");
     filter->clown_mask_image_param = gs_effect_get_param_by_name(filter->effect, "clown_mask_image");
+    filter->emotion_image_param = gs_effect_get_param_by_name(filter->effect, "emotion_image");
+    for (size_t i = 0; i < 10; ++i) {
+        filter->emotion_box_params[i] = gs_effect_get_param_by_name(
+            filter->effect, ("emotion_box" + std::to_string(i)).c_str());
+        filter->emotion_uv_params[i] = gs_effect_get_param_by_name(
+            filter->effect, ("emotion_uv" + std::to_string(i)).c_str());
+    }
 
     for (size_t i = 0; i < MAX_FACE_BOXES; ++i) {
         const std::string name = "face_box" + std::to_string(i);
@@ -1194,6 +1339,8 @@ static void *filter_create(obs_data_t *settings, obs_source_t *source,
     bfree(sunglasses_path);
     bfree(pirate_hat_path);
     bfree(clown_mask_path);
+    bfree(emotion_image_path);
+    bfree(emotion_model_path);
     if (face_only) {
         face_update(filter, settings);
         filter->detector_thread = std::thread(detector_loop, filter);
