@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-STAGE_DIR="$PROJECT_DIR/stage-emotion-top10"
+STAGE_DIR="$PROJECT_DIR/stage-emotion-cpu-reduced"
 PLUGIN_DEST="/usr/lib/obs-plugins/obs-vision-filter.so"
 DATA_DEST="/usr/share/obs/obs-plugins/obs-vision-filter"
 BACKUP_DIR="$PROJECT_DIR/backups/$(date +%Y%m%d-%H%M%S)"

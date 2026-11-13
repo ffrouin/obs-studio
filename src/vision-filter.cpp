@@ -116,6 +116,7 @@ struct vision_filter_data {
     bool clown_mask_overlay = false;
     bool emotion_overlay = false;
     double emotion_min_confidence = 0.55;
+    int emotion_interval_ms = 500;
     gs_image_file_t emotion_image{};
     bool emotion_image_ready = false;
     std::array<int, 3> overlay_slots = {1, 2, 3};
@@ -221,6 +222,7 @@ static void face_defaults(obs_data_t *settings)
     obs_data_set_bool(settings, "clown_mask_overlay", false);
     obs_data_set_bool(settings, "emotion_overlay", false);
     obs_data_set_double(settings, "emotion_min_confidence", 0.55);
+    obs_data_set_int(settings, "emotion_interval_ms", 500);
     obs_data_set_int(settings, "overlay_slot_1", 1);
     obs_data_set_int(settings, "overlay_slot_2", 2);
     obs_data_set_int(settings, "overlay_slot_3", 3);
@@ -262,6 +264,9 @@ static obs_properties_t *face_properties(void *)
     obs_properties_add_float_slider(props, "emotion_min_confidence",
                                     obs_module_text("EmotionMinConfidence"),
                                     0.30, 0.90, 0.05);
+    obs_properties_add_int_slider(props, "emotion_interval_ms",
+                                  obs_module_text("EmotionIntervalMs"),
+                                  200, 2000, 100);
     for (int slot = 1; slot <= 3; ++slot) {
         const std::string name = "overlay_slot_" + std::to_string(slot);
         obs_property_t *list = obs_properties_add_list(
@@ -308,6 +313,7 @@ static void face_update(void *data, obs_data_t *settings)
     filter->clown_mask_overlay = obs_data_get_bool(settings, "clown_mask_overlay");
     filter->emotion_overlay = obs_data_get_bool(settings, "emotion_overlay");
     filter->emotion_min_confidence = obs_data_get_double(settings, "emotion_min_confidence");
+    filter->emotion_interval_ms = static_cast<int>(obs_data_get_int(settings, "emotion_interval_ms"));
     for (size_t i = 0; i < filter->overlay_slots.size(); ++i) {
         const std::string name = "overlay_slot_" + std::to_string(i + 1);
         filter->overlay_slots[i] = static_cast<int>(obs_data_get_int(settings, name.c_str()));
@@ -367,9 +373,13 @@ static std::vector<face_box> update_tracks(std::vector<face_track> &tracks,
             track.box.nose_x += (target.nose_x - track.box.nose_x) * alpha;
             for (size_t i = 0; i < track.box.landmarks.size(); ++i)
                 track.box.landmarks[i] += (target.landmarks[i] - track.box.landmarks[i]) * alpha;
-            for (size_t i = 0; i < track.box.emotion_scores.size(); ++i)
-                track.box.emotion_scores[i] +=
-                    (target.emotion_scores[i] - track.box.emotion_scores[i]) * alpha;
+            const float emotion_sum = std::accumulate(
+                target.emotion_scores.begin(), target.emotion_scores.end(), 0.0f);
+            if (emotion_sum > 0.0f) {
+                for (size_t i = 0; i < track.box.emotion_scores.size(); ++i)
+                    track.box.emotion_scores[i] +=
+                        (target.emotion_scores[i] - track.box.emotion_scores[i]) * alpha;
+            }
             track.missed = 0;
             used[best_index] = true;
         } else {
@@ -450,6 +460,7 @@ static void detector_loop(vision_filter_data *filter)
 {
     std::vector<face_track> tracks;
     cv::Mat previous_gray;
+    auto last_emotion_inference = std::chrono::steady_clock::time_point::min();
 
     for (;;) {
         cv::Mat bgr;
@@ -585,7 +596,14 @@ static void detector_loop(vision_filter_data *filter)
             }
         }
 
-        if (filter->emotion_overlay && filter->emotion_net_ready && !normalized.empty()) {
+        const auto now = std::chrono::steady_clock::now();
+        const bool run_emotion = filter->emotion_overlay && filter->emotion_net_ready &&
+            !normalized.empty() &&
+            (last_emotion_inference == std::chrono::steady_clock::time_point::min() ||
+             now - last_emotion_inference >= std::chrono::milliseconds(
+                 std::max(200, filter->emotion_interval_ms)));
+        if (run_emotion) {
+            last_emotion_inference = now;
             std::vector<size_t> ranked(normalized.size());
             std::iota(ranked.begin(), ranked.end(), 0);
             std::sort(ranked.begin(), ranked.end(), [&normalized](size_t a, size_t b) {
