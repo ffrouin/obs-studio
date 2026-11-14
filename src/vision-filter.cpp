@@ -573,6 +573,8 @@ static void detector_loop(vision_filter_data *filter)
                     const float nh = std::clamp(height / bgr.rows, 0.0f, 1.0f - ny);
                     if (nw <= 0.0f || nh <= 0.0f)
                         continue;
+                    if (std::min(nw, nh) < static_cast<float>(filter->face_min_size))
+                        continue;
                     const float right_eye_x = detected.at<float>(row, 4);
                     const float right_eye_y = detected.at<float>(row, 5);
                     const float left_eye_x = detected.at<float>(row, 6);
