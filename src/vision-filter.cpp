@@ -902,8 +902,9 @@ static void render_faces(vision_filter_data *filter, uint32_t source_width,
         };
     }
     gs_effect_set_vec4(filter->sunglasses_box_param, &sunglasses_box);
-    gs_effect_set_float(filter->sunglasses_angle_param,
-                        target.angle);
+    // YuNet eye landmarks provide the live face inclination. The shader uses
+    // the inverse sampling angle to rotate the glasses along that eye line.
+    gs_effect_set_float(filter->sunglasses_angle_param, -target.angle);
     gs_effect_set_texture(filter->sunglasses_image_param,
                           filter->sunglasses_image.texture);
 
@@ -965,7 +966,8 @@ static void render_faces(vision_filter_data *filter, uint32_t source_width,
             mask_width,
             mask_height,
         };
-        clown_mask_angle = mask_target.angle;
+        // Use the live YuNet eye-line inclination for the mask orientation.
+        clown_mask_angle = -mask_target.angle;
     }
     gs_effect_set_vec4(filter->clown_mask_box_param, &clown_mask_box);
     gs_effect_set_float(filter->clown_mask_angle_param, clown_mask_angle);
