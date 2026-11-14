@@ -250,7 +250,7 @@ static obs_properties_t *face_properties(void *)
     obs_properties_add_bool(props, "show_face_boxes", obs_module_text("ShowFaceBoxes"));
     obs_properties_add_int_slider(props, "face_interval", obs_module_text("FaceInterval"), 1, 10, 1);
     obs_properties_add_float_slider(props, "face_scale", obs_module_text("FaceScale"), 0.20, 1.0, 0.05);
-    obs_properties_add_float_slider(props, "face_min_size", obs_module_text("FaceMinSize"), 0.02, 0.30, 0.01);
+    obs_properties_add_float_slider(props, "face_min_size", obs_module_text("FaceMinSize"), 0.001, 0.30, 0.001);
     obs_properties_add_float_slider(props, "tracking_smoothing", obs_module_text("TrackingSmoothing"), 0.05, 1.0, 0.05);
     obs_properties_add_float_slider(props, "tracking_iou", obs_module_text("TrackingIou"), 0.05, 0.80, 0.05);
     obs_properties_add_int_slider(props, "tracking_hold", obs_module_text("TrackingHold"), 0, 10, 1);
