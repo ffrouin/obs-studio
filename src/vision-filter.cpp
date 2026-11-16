@@ -49,6 +49,9 @@ struct face_box {
     float nose_x = 0.0f;
     std::array<float, 10> landmarks{};
     std::array<float, 8> emotion_scores{};
+    int emotion_displayed = -1;
+    int emotion_candidate = -1;
+    std::chrono::steady_clock::time_point emotion_candidate_since{};
 };
 
 struct face_track {
@@ -416,6 +419,30 @@ static std::vector<face_box> update_tracks(std::vector<face_track> &tracks,
     return result;
 }
 
+static int dominant_emotion(const face_box &face, float minimum_confidence)
+{
+    const auto best = std::max_element(face.emotion_scores.begin(),
+                                       face.emotion_scores.end());
+    if (best == face.emotion_scores.end() || *best < minimum_confidence)
+        return -1;
+    return static_cast<int>(std::distance(face.emotion_scores.begin(), best));
+}
+
+static void update_emotion_state(face_box &face, float minimum_confidence,
+                                 std::chrono::steady_clock::time_point now)
+{
+    const int observed = dominant_emotion(face, minimum_confidence);
+    if (observed < 0)
+        return;
+    if (observed != face.emotion_candidate) {
+        face.emotion_candidate = observed;
+        face.emotion_candidate_since = now;
+        return;
+    }
+    if (now - face.emotion_candidate_since >= std::chrono::milliseconds(600))
+        face.emotion_displayed = observed;
+}
+
 static std::array<float, 8> infer_emotion(vision_filter_data *filter,
                                           const cv::Mat &bgr,
                                           const face_box &face)
@@ -599,24 +626,6 @@ static void detector_loop(vision_filter_data *filter)
         }
 
         const auto now = std::chrono::steady_clock::now();
-        const bool run_emotion = filter->emotion_overlay && filter->emotion_net_ready &&
-            !normalized.empty() &&
-            (last_emotion_inference == std::chrono::steady_clock::time_point::min() ||
-             now - last_emotion_inference >= std::chrono::milliseconds(
-                 std::max(200, filter->emotion_interval_ms)));
-        if (run_emotion) {
-            last_emotion_inference = now;
-            std::vector<size_t> ranked(normalized.size());
-            std::iota(ranked.begin(), ranked.end(), 0);
-            std::sort(ranked.begin(), ranked.end(), [&normalized](size_t a, size_t b) {
-                return normalized[a].width * normalized[a].height >
-                       normalized[b].width * normalized[b].height;
-            });
-            for (size_t i = 0; i < std::min<size_t>(10, ranked.size()); ++i)
-                normalized[ranked[i]].emotion_scores =
-                    infer_emotion(filter, bgr, normalized[ranked[i]]);
-        }
-
         std::vector<face_box> tracked;
         if (run_detection) {
             tracked = update_tracks(
@@ -638,6 +647,34 @@ static void detector_loop(vision_filter_data *filter)
                     break;
                 tracked.push_back(track.box);
             }
+        }
+
+        const bool run_emotion = filter->emotion_overlay && filter->emotion_net_ready &&
+            !tracked.empty() &&
+            (last_emotion_inference == std::chrono::steady_clock::time_point::min() ||
+             now - last_emotion_inference >= std::chrono::milliseconds(
+                 std::max(200, filter->emotion_interval_ms)));
+        if (run_emotion) {
+            last_emotion_inference = now;
+            std::vector<size_t> ranked(tracked.size());
+            std::iota(ranked.begin(), ranked.end(), 0);
+            std::sort(ranked.begin(), ranked.end(), [&tracked](size_t a, size_t b) {
+                return tracked[a].width * tracked[a].height >
+                       tracked[b].width * tracked[b].height;
+            });
+            for (size_t i = 0; i < std::min<size_t>(10, ranked.size()); ++i) {
+                tracked[ranked[i]].emotion_scores =
+                    infer_emotion(filter, bgr, tracked[ranked[i]]);
+                update_emotion_state(
+                    tracked[ranked[i]],
+                    static_cast<float>(filter->emotion_min_confidence), now);
+            }
+        }
+        for (size_t i = 0; i < tracks.size() && i < tracked.size(); ++i) {
+            tracks[i].box.emotion_scores = tracked[i].emotion_scores;
+            tracks[i].box.emotion_displayed = tracked[i].emotion_displayed;
+            tracks[i].box.emotion_candidate = tracked[i].emotion_candidate;
+            tracks[i].box.emotion_candidate_since = tracked[i].emotion_candidate_since;
         }
 
         previous_gray = std::move(current_gray);
@@ -675,15 +712,6 @@ static size_t configured_overlay_rank(const vision_filter_data *filter, int over
             return rank;
     }
     return MAX_FACE_BOXES;
-}
-
-static int dominant_emotion(const face_box &face, float minimum_confidence)
-{
-    const auto best = std::max_element(face.emotion_scores.begin(),
-                                       face.emotion_scores.end());
-    if (best == face.emotion_scores.end() || *best < minimum_confidence)
-        return -1;
-    return static_cast<int>(std::distance(face.emotion_scores.begin(), best));
 }
 
 static bool update_sunglasses_target(vision_filter_data *filter,
