@@ -92,7 +92,9 @@ struct vision_filter_data {
     gs_eparam_t *emotion_image_param = nullptr;
     gs_eparam_t *emotion_alpha_param = nullptr;
     gs_eparam_t *emotion_panel_alpha_param = nullptr;
+    gs_eparam_t *emotion_panel_count_param = nullptr;
     std::array<gs_eparam_t *, 8> emotion_panel_score_params{};
+    std::array<gs_eparam_t *, 8> emotion_panel_icon_params{};
     std::array<gs_eparam_t *, 10> emotion_box_params{};
     std::array<gs_eparam_t *, 10> emotion_uv_params{};
     std::array<gs_eparam_t *, MAX_FACE_BOXES> face_box_params{};
@@ -1085,20 +1087,32 @@ static void render_faces(vision_filter_data *filter, uint32_t source_width,
     gs_effect_set_float(filter->emotion_alpha_param,
                         static_cast<float>(filter->emotion_alpha));
     std::array<float, 8> panel_scores{};
-    uint64_t panel_total = 0;
-    for (size_t emotion = 0; emotion < panel_scores.size(); ++emotion)
-        panel_total += filter->emotion_panel_counters[emotion].load(
+    std::array<float, 8> panel_icons{};
+    double panel_weight_total = 0.0;
+    for (size_t emotion = 0; emotion < panel_scores.size(); ++emotion) {
+        const uint64_t count = filter->emotion_panel_counters[emotion].load(
             std::memory_order_relaxed);
-    if (panel_total > 0) {
-        for (size_t emotion = 0; emotion < panel_scores.size(); ++emotion)
-            panel_scores[emotion] = static_cast<float>(
-                filter->emotion_panel_counters[emotion].load(std::memory_order_relaxed)) /
-                static_cast<float>(panel_total);
+        if (count > 0)
+            panel_weight_total += std::log1p(static_cast<double>(count));
     }
-    if (!filter->emotion_panel)
-        panel_scores.fill(0.0f);
-    for (size_t emotion = 0; emotion < panel_scores.size(); ++emotion)
+    size_t panel_count = 0;
+    if (filter->emotion_panel && panel_weight_total > 0.0) {
+        for (size_t emotion = 0; emotion < panel_scores.size(); ++emotion) {
+            const uint64_t count = filter->emotion_panel_counters[emotion].load(
+                std::memory_order_relaxed);
+            if (count == 0)
+                continue;
+            const double weight = std::log1p(static_cast<double>(count));
+            panel_scores[panel_count] = static_cast<float>(weight / panel_weight_total);
+            panel_icons[panel_count] = static_cast<float>(emotion);
+            ++panel_count;
+        }
+    }
+    for (size_t emotion = 0; emotion < panel_scores.size(); ++emotion) {
         gs_effect_set_float(filter->emotion_panel_score_params[emotion], panel_scores[emotion]);
+        gs_effect_set_float(filter->emotion_panel_icon_params[emotion], panel_icons[emotion]);
+    }
+    gs_effect_set_int(filter->emotion_panel_count_param, static_cast<int>(panel_count));
     gs_effect_set_float(filter->emotion_panel_alpha_param,
                         static_cast<float>(filter->emotion_panel_alpha));
     std::vector<size_t> emotion_ranks(faces.size());
@@ -1518,9 +1532,13 @@ static void *filter_create(obs_data_t *settings, obs_source_t *source,
     filter->emotion_image_param = gs_effect_get_param_by_name(filter->effect, "emotion_image");
     filter->emotion_alpha_param = gs_effect_get_param_by_name(filter->effect, "emotion_alpha");
     filter->emotion_panel_alpha_param = gs_effect_get_param_by_name(filter->effect, "emotion_panel_alpha");
-    for (size_t i = 0; i < filter->emotion_panel_score_params.size(); ++i)
+    filter->emotion_panel_count_param = gs_effect_get_param_by_name(filter->effect, "emotion_panel_count");
+    for (size_t i = 0; i < filter->emotion_panel_score_params.size(); ++i) {
         filter->emotion_panel_score_params[i] = gs_effect_get_param_by_name(
             filter->effect, ("emotion_panel_score" + std::to_string(i)).c_str());
+        filter->emotion_panel_icon_params[i] = gs_effect_get_param_by_name(
+            filter->effect, ("emotion_panel_icon" + std::to_string(i)).c_str());
+    }
     for (size_t i = 0; i < 10; ++i) {
         filter->emotion_box_params[i] = gs_effect_get_param_by_name(
             filter->effect, ("emotion_box" + std::to_string(i)).c_str());
