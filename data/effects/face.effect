@@ -207,7 +207,7 @@ void blend_emotion_panel_row(inout float3 result, float2 uv, float score, float 
     if (local.x >= icon_left - panel_left && local.x <= icon_left - panel_left + icon_width) {
         float2 icon_uv = float2((local.x - (icon_left - panel_left)) / icon_width,
                                 local.y / row_height);
-        float2 atlas_uv = float2(icon_index / 13.0 + icon_uv.x / 13.0, icon_uv.y);
+        float2 atlas_uv = float2(icon_index / 53.0 + icon_uv.x / 53.0, icon_uv.y);
         float4 emoji = emotion_image.Sample(linear_sampler, atlas_uv);
         result = lerp(result, emoji.rgb, emoji.a * emotion_panel_alpha);
         return;
