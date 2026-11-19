@@ -20,6 +20,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <deque>
+#include <filesystem>
 #include <fstream>
 #include <mutex>
 #include <numeric>
@@ -38,6 +40,9 @@
 
 namespace {
 constexpr size_t MAX_FACE_BOXES = 10;
+constexpr size_t RAW_EMOTION_COUNT = 8;
+constexpr size_t DERIVED_EMOTION_COUNT = 5;
+constexpr size_t PANEL_EMOTION_COUNT = RAW_EMOTION_COUNT + DERIVED_EMOTION_COUNT;
 
 struct face_box {
     float x;
@@ -48,8 +53,11 @@ struct face_box {
     float eye_y = 0.0f;
     float nose_x = 0.0f;
     std::array<float, 10> landmarks{};
-    std::array<float, 8> emotion_scores{};
+    std::array<float, RAW_EMOTION_COUNT> emotion_scores{};
+    std::array<float, DERIVED_EMOTION_COUNT> derived_emotion_scores{};
     int emotion_displayed = -1;
+    std::chrono::steady_clock::time_point emotion_displayed_until{};
+    std::deque<int> emotion_queue;
     int emotion_candidate = -1;
     std::chrono::steady_clock::time_point emotion_candidate_since{};
 };
@@ -58,6 +66,7 @@ struct face_track {
     face_box box;
     face_box velocity = {0.0f, 0.0f, 0.0f, 0.0f};
     int missed = 0;
+    std::chrono::steady_clock::time_point first_seen{};
 };
 
 struct vision_filter_data {
@@ -93,10 +102,10 @@ struct vision_filter_data {
     gs_eparam_t *emotion_alpha_param = nullptr;
     gs_eparam_t *emotion_panel_alpha_param = nullptr;
     gs_eparam_t *emotion_panel_count_param = nullptr;
-    std::array<gs_eparam_t *, 8> emotion_panel_score_params{};
-    std::array<gs_eparam_t *, 8> emotion_panel_icon_params{};
-    std::array<gs_eparam_t *, 10> emotion_box_params{};
-    std::array<gs_eparam_t *, 10> emotion_uv_params{};
+    std::array<gs_eparam_t *, PANEL_EMOTION_COUNT> emotion_panel_score_params{};
+    std::array<gs_eparam_t *, PANEL_EMOTION_COUNT> emotion_panel_icon_params{};
+    std::array<gs_eparam_t *, PANEL_EMOTION_COUNT> emotion_box_params{};
+    std::array<gs_eparam_t *, PANEL_EMOTION_COUNT> emotion_uv_params{};
     std::array<gs_eparam_t *, MAX_FACE_BOXES> face_box_params{};
     std::array<std::array<gs_eparam_t *, 3>, MAX_FACE_BOXES> landmark_params{};
 
@@ -126,13 +135,13 @@ struct vision_filter_data {
     bool darth_vader_overlay = false;
     bool mustache_overlay = false;
     bool emotion_overlay = false;
-    double emotion_min_confidence = 0.55;
+    double emotion_min_confidence = 0.15;
     int emotion_interval_ms = 500;
-    double emotion_size_ratio = 0.55;
+    double emotion_size_ratio = 0.75;
     double emotion_alpha = 1.0;
     bool emotion_panel = false;
     double emotion_panel_alpha = 0.90;
-    std::array<std::atomic<uint64_t>, 8> emotion_panel_counters{};
+    std::array<std::atomic<uint64_t>, PANEL_EMOTION_COUNT> emotion_panel_counters{};
     gs_image_file_t emotion_image{};
     bool emotion_image_ready = false;
     std::array<int, 3> overlay_slots = {1, 2, 3};
@@ -243,9 +252,9 @@ static void face_defaults(obs_data_t *settings)
     obs_data_set_default_bool(settings, "darth_vader_overlay", false);
     obs_data_set_default_bool(settings, "mustache_overlay", false);
     obs_data_set_default_bool(settings, "emotion_overlay", false);
-    obs_data_set_default_double(settings, "emotion_min_confidence", 0.55);
+    obs_data_set_default_double(settings, "emotion_min_confidence", 0.15);
     obs_data_set_default_int(settings, "emotion_interval_ms", 500);
-    obs_data_set_default_double(settings, "emotion_size_ratio", 0.55);
+    obs_data_set_default_double(settings, "emotion_size_ratio", 0.75);
     obs_data_set_default_double(settings, "emotion_alpha", 1.0);
     obs_data_set_default_bool(settings, "emotion_panel", false);
     obs_data_set_default_double(settings, "emotion_panel_alpha", 0.90);
@@ -291,7 +300,7 @@ static obs_properties_t *face_properties(void *)
     obs_properties_add_bool(props, "emotion_overlay", obs_module_text("EmotionOverlay"));
     obs_properties_add_float_slider(props, "emotion_min_confidence",
                                     obs_module_text("EmotionMinConfidence"),
-                                    0.30, 0.90, 0.05);
+                                    0.10, 0.90, 0.05);
     obs_properties_add_int_slider(props, "emotion_interval_ms",
                                   obs_module_text("EmotionIntervalMs"),
                                   200, 2000, 100);
@@ -358,7 +367,8 @@ static void face_update(void *data, obs_data_t *settings)
     filter->darth_vader_overlay = obs_data_get_bool(settings, "darth_vader_overlay");
     filter->mustache_overlay = obs_data_get_bool(settings, "mustache_overlay");
     filter->emotion_overlay = obs_data_get_bool(settings, "emotion_overlay");
-    filter->emotion_min_confidence = obs_data_get_double(settings, "emotion_min_confidence");
+    filter->emotion_min_confidence = std::clamp(
+        obs_data_get_double(settings, "emotion_min_confidence"), 0.10, 0.90);
     filter->emotion_interval_ms = static_cast<int>(obs_data_get_int(settings, "emotion_interval_ms"));
     filter->emotion_size_ratio = std::clamp(obs_data_get_double(settings, "emotion_size_ratio"), 0.10, 2.00);
     filter->emotion_alpha = std::clamp(obs_data_get_double(settings, "emotion_alpha"), 0.0, 1.0);
@@ -388,7 +398,8 @@ static float box_iou(const face_box &a, const face_box &b)
 static std::vector<face_box> update_tracks(std::vector<face_track> &tracks,
                                            const std::vector<face_box> &detections,
                                            float smoothing, float minimum_iou,
-                                           int max_missed)
+                                           int max_missed,
+                                           std::chrono::steady_clock::time_point now)
 {
     std::vector<bool> used(detections.size(), false);
     const float alpha = std::clamp(smoothing, 0.05f, 1.0f);
@@ -430,6 +441,8 @@ static std::vector<face_box> update_tracks(std::vector<face_track> &tracks,
                     track.box.emotion_scores[i] +=
                         (target.emotion_scores[i] - track.box.emotion_scores[i]) * alpha;
             }
+            if (track.missed > 0)
+                track.first_seen = now;
             track.missed = 0;
             used[best_index] = true;
         } else {
@@ -447,7 +460,7 @@ static std::vector<face_box> update_tracks(std::vector<face_track> &tracks,
 
     for (size_t i = 0; i < detections.size(); ++i) {
         if (!used[i])
-            tracks.push_back({detections[i], {}, 0});
+            tracks.push_back({detections[i], {}, 0, now});
     }
 
     tracks.erase(std::remove_if(tracks.begin(), tracks.end(),
@@ -458,9 +471,13 @@ static std::vector<face_box> update_tracks(std::vector<face_track> &tracks,
 
     std::vector<face_box> result;
     result.reserve(std::min(tracks.size(), MAX_FACE_BOXES));
+    constexpr auto minimum_lifetime = std::chrono::milliseconds(200);
     for (const face_track &track : tracks) {
         if (result.size() == MAX_FACE_BOXES)
             break;
+        if (track.first_seen == std::chrono::steady_clock::time_point{} ||
+            now - track.first_seen < minimum_lifetime)
+            continue;
         result.push_back(track.box);
     }
     return result;
@@ -475,26 +492,55 @@ static int dominant_emotion(const face_box &face, float minimum_confidence)
     return static_cast<int>(std::distance(face.emotion_scores.begin(), best));
 }
 
-static void update_emotion_state(face_box &face, float minimum_confidence,
+static void advance_emotion_queue(face_box &face,
+                                  std::chrono::steady_clock::time_point now)
+{
+    if (face.emotion_displayed >= 0 && now < face.emotion_displayed_until)
+        return;
+    if (!face.emotion_queue.empty()) {
+        face.emotion_displayed = face.emotion_queue.front();
+        face.emotion_queue.pop_front();
+        face.emotion_displayed_until = now + std::chrono::milliseconds(500);
+    } else {
+        // Keep the last accepted emotion visible until a new accepted emotion
+        // is ready; the 500 ms value is a minimum display time, not a timeout.
+        face.emotion_displayed_until = std::chrono::steady_clock::time_point::max();
+    }
+}
+
+static bool update_emotion_state(face_box &face, int observed,
                                  std::chrono::steady_clock::time_point now)
 {
-    const int observed = dominant_emotion(face, minimum_confidence);
+    advance_emotion_queue(face, now);
     if (observed < 0)
-        return;
+        return false;
     if (observed != face.emotion_candidate) {
         face.emotion_candidate = observed;
         face.emotion_candidate_since = now;
-        return;
+        return false;
     }
-    if (now - face.emotion_candidate_since >= std::chrono::milliseconds(600))
-        face.emotion_displayed = observed;
+    if (now - face.emotion_candidate_since >= std::chrono::milliseconds(500)) {
+        if (face.emotion_displayed < 0 ||
+            face.emotion_displayed_until == std::chrono::steady_clock::time_point::max() ||
+            now >= face.emotion_displayed_until) {
+            face.emotion_displayed = observed;
+            face.emotion_displayed_until = now + std::chrono::milliseconds(500);
+            return true;
+        } else if (observed != face.emotion_displayed &&
+                   std::find(face.emotion_queue.begin(), face.emotion_queue.end(), observed) ==
+                       face.emotion_queue.end()) {
+            face.emotion_queue.push_back(observed);
+            return true;
+        }
+    }
+    return false;
 }
 
-static std::array<float, 8> infer_emotion(vision_filter_data *filter,
+static std::array<float, RAW_EMOTION_COUNT> infer_emotion(vision_filter_data *filter,
                                           const cv::Mat &bgr,
                                           const face_box &face)
 {
-    std::array<float, 8> scores{};
+    std::array<float, RAW_EMOTION_COUNT> scores{};
     if (!filter->emotion_net_ready || bgr.empty())
         return scores;
 
@@ -528,6 +574,46 @@ static std::array<float, 8> infer_emotion(vision_filter_data *filter,
         for (float &score : scores)
             score /= sum;
     return scores;
+}
+
+static std::array<float, DERIVED_EMOTION_COUNT> derive_emotions(
+    face_box &face, float minimum_confidence)
+{
+    const float mouth_width = std::abs(face.landmarks[8] - face.landmarks[6]);
+    const float mouth_ratio = face.width > 0.0f ? mouth_width / face.width : 0.0f;
+    const float smile_geometry = std::clamp((mouth_ratio - 0.24f) / 0.18f, 0.0f, 1.0f);
+    if (face.emotion_scores[1] >= minimum_confidence)
+        face.emotion_scores[1] = std::clamp(
+            face.emotion_scores[1] * 0.80f + smile_geometry * 0.20f, 0.0f, 1.0f);
+
+    std::array<float, DERIVED_EMOTION_COUNT> derived{};
+    const float negative = std::max({face.emotion_scores[3], face.emotion_scores[4],
+                                     face.emotion_scores[5], face.emotion_scores[6],
+                                     face.emotion_scores[7]});
+    const bool happy_accepted = face.emotion_scores[1] >= minimum_confidence;
+    const bool neutral_accepted = face.emotion_scores[0] >= minimum_confidence;
+    const bool negative_accepted = negative >= minimum_confidence;
+    const bool excitement_accepted =
+        std::max(face.emotion_scores[1], face.emotion_scores[2]) >= minimum_confidence;
+    const bool stress_accepted =
+        std::max(face.emotion_scores[4], face.emotion_scores[6]) >= minimum_confidence;
+    if (happy_accepted)
+        derived[0] = std::clamp(face.emotion_scores[1] * 0.65f +
+                                    smile_geometry * 0.35f, 0.0f, 1.0f); // positive
+    if (negative_accepted)
+        derived[1] = negative; // negative
+    if (neutral_accepted)
+        derived[2] = std::clamp(face.emotion_scores[0] *
+                                    (1.0f - face.emotion_scores[2] * 0.5f),
+                                0.0f, 1.0f); // calm
+    if (excitement_accepted)
+        derived[3] = std::max(face.emotion_scores[2],
+                              face.emotion_scores[1] * 0.75f); // excited
+    if (stress_accepted)
+        derived[4] = std::clamp(std::max(face.emotion_scores[4], face.emotion_scores[6]) *
+                                    0.85f + negative * 0.15f,
+                                0.0f, 1.0f); // stressed
+    return derived;
 }
 
 static void detector_loop(vision_filter_data *filter)
@@ -679,7 +765,8 @@ static void detector_loop(vision_filter_data *filter)
                 tracks, normalized,
                 static_cast<float>(filter->tracking_smoothing),
                 static_cast<float>(filter->tracking_iou),
-                filter->tracking_hold);
+                filter->tracking_hold,
+                now);
             const bool present = !normalized.empty();
             filter->current_detection_present.store(present);
             filter->last_detection_ns.store(
@@ -696,7 +783,8 @@ static void detector_loop(vision_filter_data *filter)
             }
         }
 
-        const bool run_emotion = filter->emotion_overlay && filter->emotion_net_ready &&
+        const bool run_emotion = (filter->emotion_overlay || filter->emotion_panel) &&
+            filter->emotion_net_ready &&
             !tracked.empty() &&
             (last_emotion_inference == std::chrono::steady_clock::time_point::min() ||
              now - last_emotion_inference >= std::chrono::milliseconds(
@@ -712,22 +800,45 @@ static void detector_loop(vision_filter_data *filter)
             for (size_t i = 0; i < std::min<size_t>(10, ranked.size()); ++i) {
                 tracked[ranked[i]].emotion_scores =
                     infer_emotion(filter, bgr, tracked[ranked[i]]);
-                update_emotion_state(
-                    tracked[ranked[i]],
-                    static_cast<float>(filter->emotion_min_confidence), now);
+                const auto derived = derive_emotions(
+                    tracked[ranked[i]], static_cast<float>(filter->emotion_min_confidence));
+                tracked[ranked[i]].derived_emotion_scores = derived;
                 const int accepted_emotion = dominant_emotion(
                     tracked[ranked[i]],
                     static_cast<float>(filter->emotion_min_confidence));
-                if (accepted_emotion >= 0)
-                    filter->emotion_panel_counters[static_cast<size_t>(accepted_emotion)]
+                int displayed_candidate = accepted_emotion;
+                const auto best_derived = std::max_element(derived.begin(), derived.end());
+                if (best_derived != derived.end() &&
+                    *best_derived >= filter->emotion_min_confidence)
+                    displayed_candidate = RAW_EMOTION_COUNT + static_cast<int>(
+                        std::distance(derived.begin(), best_derived));
+                const bool queued_for_display = update_emotion_state(
+                    tracked[ranked[i]], displayed_candidate, now);
+                if (queued_for_display)
+                    filter->emotion_panel_counters[static_cast<size_t>(displayed_candidate)]
                         .fetch_add(1, std::memory_order_relaxed);
             }
         }
-        for (size_t i = 0; i < tracks.size() && i < tracked.size(); ++i) {
-            tracks[i].box.emotion_scores = tracked[i].emotion_scores;
-            tracks[i].box.emotion_displayed = tracked[i].emotion_displayed;
-            tracks[i].box.emotion_candidate = tracked[i].emotion_candidate;
-            tracks[i].box.emotion_candidate_since = tracked[i].emotion_candidate_since;
+        for (face_box &tracked_face : tracked) {
+            advance_emotion_queue(tracked_face, now);
+            size_t best_track = tracks.size();
+            float best_iou = 0.0f;
+            for (size_t track_index = 0; track_index < tracks.size(); ++track_index) {
+                const float overlap = box_iou(tracks[track_index].box, tracked_face);
+                if (overlap > best_iou) {
+                    best_iou = overlap;
+                    best_track = track_index;
+                }
+            }
+            if (best_track == tracks.size())
+                continue;
+            tracks[best_track].box.emotion_scores = tracked_face.emotion_scores;
+            tracks[best_track].box.derived_emotion_scores = tracked_face.derived_emotion_scores;
+            tracks[best_track].box.emotion_displayed = tracked_face.emotion_displayed;
+            tracks[best_track].box.emotion_displayed_until = tracked_face.emotion_displayed_until;
+            tracks[best_track].box.emotion_queue = tracked_face.emotion_queue;
+            tracks[best_track].box.emotion_candidate = tracked_face.emotion_candidate;
+            tracks[best_track].box.emotion_candidate_since = tracked_face.emotion_candidate_since;
         }
 
         previous_gray = std::move(current_gray);
@@ -1086,8 +1197,8 @@ static void render_faces(vision_filter_data *filter, uint32_t source_width,
     gs_effect_set_texture(filter->emotion_image_param, filter->emotion_image.texture);
     gs_effect_set_float(filter->emotion_alpha_param,
                         static_cast<float>(filter->emotion_alpha));
-    std::array<float, 8> panel_scores{};
-    std::array<float, 8> panel_icons{};
+    std::array<float, PANEL_EMOTION_COUNT> panel_scores{};
+    std::array<float, PANEL_EMOTION_COUNT> panel_icons{};
     double panel_weight_total = 0.0;
     for (size_t emotion = 0; emotion < panel_scores.size(); ++emotion) {
         const uint64_t count = filter->emotion_panel_counters[emotion].load(
@@ -1120,14 +1231,13 @@ static void render_faces(vision_filter_data *filter, uint32_t source_width,
     std::sort(emotion_ranks.begin(), emotion_ranks.end(), [&faces](size_t a, size_t b) {
         return faces[a].width * faces[a].height > faces[b].width * faces[b].height;
     });
-    for (size_t slot = 0; slot < 10; ++slot) {
+    for (size_t slot = 0; slot < MAX_FACE_BOXES; ++slot) {
         struct vec4 box = {0.0f, 0.0f, 0.0f, 0.0f};
         struct vec4 atlas_rect = {0.0f, 0.0f, 0.0f, 0.0f};
         if (filter->emotion_overlay && filter->emotion_image_ready &&
             detection_is_alive(filter) && slot < emotion_ranks.size()) {
             const face_box &face = faces[emotion_ranks[slot]];
-            const int emotion = dominant_emotion(
-                face, static_cast<float>(filter->emotion_min_confidence));
+            const int emotion = face.emotion_displayed;
             if (emotion >= 0) {
                 const float emoji_width = face.width * static_cast<float>(filter->emotion_size_ratio);
                 const float emoji_height = emoji_width *
@@ -1135,12 +1245,14 @@ static void render_faces(vision_filter_data *filter, uint32_t source_width,
                 const float center_x = face.x + face.width * 0.5f;
                 const float y = std::max(0.0f, face.y - emoji_height - face.height * 0.04f);
                 box = {center_x - emoji_width * 0.5f, y, emoji_width, emoji_height};
-                atlas_rect = {static_cast<float>(emotion) / 8.0f, 0.0f,
-                              1.0f / 8.0f, 1.0f};
+                atlas_rect = {static_cast<float>(emotion) / static_cast<float>(PANEL_EMOTION_COUNT), 0.0f,
+                              1.0f / static_cast<float>(PANEL_EMOTION_COUNT), 1.0f};
             }
         }
-        gs_effect_set_vec4(filter->emotion_box_params[slot], &box);
-        gs_effect_set_vec4(filter->emotion_uv_params[slot], &atlas_rect);
+        if (filter->emotion_box_params[slot])
+            gs_effect_set_vec4(filter->emotion_box_params[slot], &box);
+        if (filter->emotion_uv_params[slot])
+            gs_effect_set_vec4(filter->emotion_uv_params[slot], &atlas_rect);
     }
 
     for (size_t i = 0; i < MAX_FACE_BOXES; ++i) {
@@ -1539,7 +1651,7 @@ static void *filter_create(obs_data_t *settings, obs_source_t *source,
         filter->emotion_panel_icon_params[i] = gs_effect_get_param_by_name(
             filter->effect, ("emotion_panel_icon" + std::to_string(i)).c_str());
     }
-    for (size_t i = 0; i < 10; ++i) {
+    for (size_t i = 0; i < PANEL_EMOTION_COUNT; ++i) {
         filter->emotion_box_params[i] = gs_effect_get_param_by_name(
             filter->effect, ("emotion_box" + std::to_string(i)).c_str());
         filter->emotion_uv_params[i] = gs_effect_get_param_by_name(

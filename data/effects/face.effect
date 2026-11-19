@@ -65,6 +65,11 @@ uniform float emotion_panel_score4;
 uniform float emotion_panel_score5;
 uniform float emotion_panel_score6;
 uniform float emotion_panel_score7;
+uniform float emotion_panel_score8;
+uniform float emotion_panel_score9;
+uniform float emotion_panel_score10;
+uniform float emotion_panel_score11;
+uniform float emotion_panel_score12;
 uniform float emotion_panel_icon0;
 uniform float emotion_panel_icon1;
 uniform float emotion_panel_icon2;
@@ -73,6 +78,11 @@ uniform float emotion_panel_icon4;
 uniform float emotion_panel_icon5;
 uniform float emotion_panel_icon6;
 uniform float emotion_panel_icon7;
+uniform float emotion_panel_icon8;
+uniform float emotion_panel_icon9;
+uniform float emotion_panel_icon10;
+uniform float emotion_panel_icon11;
+uniform float emotion_panel_icon12;
 uniform float4 emotion_box0;
 uniform float4 emotion_box1;
 uniform float4 emotion_box2;
@@ -86,6 +96,9 @@ uniform float4 emotion_box6;
 uniform float4 emotion_box7;
 uniform float4 emotion_box8;
 uniform float4 emotion_box9;
+uniform float4 emotion_box10;
+uniform float4 emotion_box11;
+uniform float4 emotion_box12;
 uniform float4 emotion_uv3;
 uniform float4 emotion_uv4;
 uniform float4 emotion_uv5;
@@ -93,6 +106,9 @@ uniform float4 emotion_uv6;
 uniform float4 emotion_uv7;
 uniform float4 emotion_uv8;
 uniform float4 emotion_uv9;
+uniform float4 emotion_uv10;
+uniform float4 emotion_uv11;
+uniform float4 emotion_uv12;
 
 sampler_state linear_sampler {
     Filter = Linear;
@@ -191,7 +207,7 @@ void blend_emotion_panel_row(inout float3 result, float2 uv, float score, float 
     if (local.x >= icon_left - panel_left && local.x <= icon_left - panel_left + icon_width) {
         float2 icon_uv = float2((local.x - (icon_left - panel_left)) / icon_width,
                                 local.y / row_height);
-        float2 atlas_uv = float2(icon_index / 8.0 + icon_uv.x / 8.0, icon_uv.y);
+        float2 atlas_uv = float2(icon_index / 13.0 + icon_uv.x / 13.0, icon_uv.y);
         float4 emoji = emotion_image.Sample(linear_sampler, atlas_uv);
         result = lerp(result, emoji.rgb, emoji.a * emotion_panel_alpha);
         return;
@@ -276,6 +292,9 @@ float4 PSFace(VertData v) : TARGET
     blend_emotion(result, v.uv, emotion_box7, emotion_uv7);
     blend_emotion(result, v.uv, emotion_box8, emotion_uv8);
     blend_emotion(result, v.uv, emotion_box9, emotion_uv9);
+    blend_emotion(result, v.uv, emotion_box10, emotion_uv10);
+    blend_emotion(result, v.uv, emotion_box11, emotion_uv11);
+    blend_emotion(result, v.uv, emotion_box12, emotion_uv12);
 
     if (emotion_panel_count > 0) {
         blend_emotion_panel_background(result, v.uv);
@@ -287,6 +306,11 @@ float4 PSFace(VertData v) : TARGET
         blend_emotion_panel_row(result, v.uv, emotion_panel_score5, 5.0, emotion_panel_icon5);
         blend_emotion_panel_row(result, v.uv, emotion_panel_score6, 6.0, emotion_panel_icon6);
         blend_emotion_panel_row(result, v.uv, emotion_panel_score7, 7.0, emotion_panel_icon7);
+        blend_emotion_panel_row(result, v.uv, emotion_panel_score8, 8.0, emotion_panel_icon8);
+        blend_emotion_panel_row(result, v.uv, emotion_panel_score9, 9.0, emotion_panel_icon9);
+        blend_emotion_panel_row(result, v.uv, emotion_panel_score10, 10.0, emotion_panel_icon10);
+        blend_emotion_panel_row(result, v.uv, emotion_panel_score11, 11.0, emotion_panel_icon11);
+        blend_emotion_panel_row(result, v.uv, emotion_panel_score12, 12.0, emotion_panel_icon12);
     }
 
 
