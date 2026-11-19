@@ -11,6 +11,36 @@ uniform float4 face_box6;
 uniform float4 face_box7;
 uniform float4 face_box8;
 uniform float4 face_box9;
+uniform float4 face_landmarks0_0;
+uniform float4 face_landmarks0_1;
+uniform float4 face_landmarks0_2;
+uniform float4 face_landmarks1_0;
+uniform float4 face_landmarks1_1;
+uniform float4 face_landmarks1_2;
+uniform float4 face_landmarks2_0;
+uniform float4 face_landmarks2_1;
+uniform float4 face_landmarks2_2;
+uniform float4 face_landmarks3_0;
+uniform float4 face_landmarks3_1;
+uniform float4 face_landmarks3_2;
+uniform float4 face_landmarks4_0;
+uniform float4 face_landmarks4_1;
+uniform float4 face_landmarks4_2;
+uniform float4 face_landmarks5_0;
+uniform float4 face_landmarks5_1;
+uniform float4 face_landmarks5_2;
+uniform float4 face_landmarks6_0;
+uniform float4 face_landmarks6_1;
+uniform float4 face_landmarks6_2;
+uniform float4 face_landmarks7_0;
+uniform float4 face_landmarks7_1;
+uniform float4 face_landmarks7_2;
+uniform float4 face_landmarks8_0;
+uniform float4 face_landmarks8_1;
+uniform float4 face_landmarks8_2;
+uniform float4 face_landmarks9_0;
+uniform float4 face_landmarks9_1;
+uniform float4 face_landmarks9_2;
 
 uniform float4 face_box_color;
 uniform float face_box_width;
@@ -72,14 +102,28 @@ bool on_face_box(float2 uv, float4 box)
     return inside && min(distance_to_edge.x, distance_to_edge.y) <= face_box_width;
 }
 
+bool on_landmark(float2 uv, float2 point)
+{
+    return point.x >= 0.0 && abs(uv.x - point.x) <= 0.006 &&
+           abs(uv.y - point.y) <= 0.006;
+}
+
+void draw_landmarks(inout float3 result, float2 uv, float4 p0, float4 p1, float4 p2)
+{
+    if (on_landmark(uv, p0.xy) || on_landmark(uv, p0.zw) ||
+        on_landmark(uv, p1.xy) || on_landmark(uv, p1.zw) ||
+        on_landmark(uv, p2.xy) || on_landmark(uv, p2.zw))
+        result = float3(1.0, 0.0, 1.0);
+}
+
 float2 rotated_image_uv(float2 uv, float4 box, float angle)
 {
-    float2 delta = uv - (box.xy + box.zw * 0.5);
+    float2 delta = (uv - (box.xy + box.zw * 0.5)) / box.zw;
     float c = cos(angle);
     float s = sin(angle);
     float2 rotated = float2(c * delta.x + s * delta.y,
                             -s * delta.x + c * delta.y);
-    return rotated / box.zw + float2(0.5, 0.5);
+    return rotated + float2(0.5, 0.5);
 }
 
 void blend_emotion(inout float3 result, float2 uv, float4 box, float4 atlas_rect)
@@ -149,6 +193,17 @@ float4 PSFace(VertData v) : TARGET
     if (face_count > 7 && on_face_box(v.uv, face_box7)) result = face_box_color.rgb;
     if (face_count > 8 && on_face_box(v.uv, face_box8)) result = face_box_color.rgb;
     if (face_count > 9 && on_face_box(v.uv, face_box9)) result = face_box_color.rgb;
+
+    if (face_count > 0) draw_landmarks(result, v.uv, face_landmarks0_0, face_landmarks0_1, face_landmarks0_2);
+    if (face_count > 1) draw_landmarks(result, v.uv, face_landmarks1_0, face_landmarks1_1, face_landmarks1_2);
+    if (face_count > 2) draw_landmarks(result, v.uv, face_landmarks2_0, face_landmarks2_1, face_landmarks2_2);
+    if (face_count > 3) draw_landmarks(result, v.uv, face_landmarks3_0, face_landmarks3_1, face_landmarks3_2);
+    if (face_count > 4) draw_landmarks(result, v.uv, face_landmarks4_0, face_landmarks4_1, face_landmarks4_2);
+    if (face_count > 5) draw_landmarks(result, v.uv, face_landmarks5_0, face_landmarks5_1, face_landmarks5_2);
+    if (face_count > 6) draw_landmarks(result, v.uv, face_landmarks6_0, face_landmarks6_1, face_landmarks6_2);
+    if (face_count > 7) draw_landmarks(result, v.uv, face_landmarks7_0, face_landmarks7_1, face_landmarks7_2);
+    if (face_count > 8) draw_landmarks(result, v.uv, face_landmarks8_0, face_landmarks8_1, face_landmarks8_2);
+    if (face_count > 9) draw_landmarks(result, v.uv, face_landmarks9_0, face_landmarks9_1, face_landmarks9_2);
 
     return float4(result, original.a);
 }

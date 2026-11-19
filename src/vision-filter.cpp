@@ -93,6 +93,7 @@ struct vision_filter_data {
     std::array<gs_eparam_t *, 10> emotion_box_params{};
     std::array<gs_eparam_t *, 10> emotion_uv_params{};
     std::array<gs_eparam_t *, MAX_FACE_BOXES> face_box_params{};
+    std::array<std::array<gs_eparam_t *, 3>, MAX_FACE_BOXES> landmark_params{};
 
     double threshold = 0.20;
     double strength = 1.0;
@@ -197,38 +198,38 @@ static const char *face_filter_name(void *)
 
 static void contour_defaults(obs_data_t *settings)
 {
-    obs_data_set_double(settings, "threshold", 0.20);
-    obs_data_set_double(settings, "strength", 1.0);
-    obs_data_set_double(settings, "color_levels", 4.0);
-    obs_data_set_double(settings, "saturation", 1.15);
-    obs_data_set_double(settings, "fill_strength", 0.0);
-    obs_data_set_double(settings, "comic_strength", 1.0);
-    obs_data_set_int(settings, "color", 0xFF000000);
-    obs_data_set_int(settings, "fill_color", 0xFFFFFFFF);
+    obs_data_set_default_double(settings, "threshold", 0.20);
+    obs_data_set_default_double(settings, "strength", 1.0);
+    obs_data_set_default_double(settings, "color_levels", 4.0);
+    obs_data_set_default_double(settings, "saturation", 1.15);
+    obs_data_set_default_double(settings, "fill_strength", 0.0);
+    obs_data_set_default_double(settings, "comic_strength", 1.0);
+    obs_data_set_default_int(settings, "color", 0xFF000000);
+    obs_data_set_default_int(settings, "fill_color", 0xFFFFFFFF);
 }
 
 static void face_defaults(obs_data_t *settings)
 {
-    obs_data_set_bool(settings, "face_detection", true);
-    obs_data_set_int(settings, "face_interval", 3);
-    obs_data_set_double(settings, "face_scale", 0.5);
-    obs_data_set_double(settings, "face_min_size", 0.02);
-    obs_data_set_double(settings, "tracking_smoothing", 0.45);
-    obs_data_set_double(settings, "tracking_iou", 0.10);
-    obs_data_set_int(settings, "tracking_hold", 5);
-    obs_data_set_bool(settings, "flip_analysis_vertical", false);
-    obs_data_set_double(settings, "face_box_width", 0.004);
-    obs_data_set_int(settings, "face_box_color", 0xFF00FF00);
-    obs_data_set_bool(settings, "show_face_boxes", true);
-    obs_data_set_bool(settings, "sunglasses_overlay", false);
-    obs_data_set_bool(settings, "pirate_hat_overlay", false);
-    obs_data_set_bool(settings, "clown_mask_overlay", false);
-    obs_data_set_bool(settings, "emotion_overlay", false);
-    obs_data_set_double(settings, "emotion_min_confidence", 0.55);
-    obs_data_set_int(settings, "emotion_interval_ms", 500);
-    obs_data_set_int(settings, "overlay_slot_1", 1);
-    obs_data_set_int(settings, "overlay_slot_2", 2);
-    obs_data_set_int(settings, "overlay_slot_3", 3);
+    obs_data_set_default_bool(settings, "face_detection", true);
+    obs_data_set_default_int(settings, "face_interval", 3);
+    obs_data_set_default_double(settings, "face_scale", 0.5);
+    obs_data_set_default_double(settings, "face_min_size", 0.02);
+    obs_data_set_default_double(settings, "tracking_smoothing", 0.45);
+    obs_data_set_default_double(settings, "tracking_iou", 0.10);
+    obs_data_set_default_int(settings, "tracking_hold", 5);
+    obs_data_set_default_bool(settings, "flip_analysis_vertical", false);
+    obs_data_set_default_double(settings, "face_box_width", 0.004);
+    obs_data_set_default_int(settings, "face_box_color", 0xFF00FF00);
+    obs_data_set_default_bool(settings, "show_face_boxes", true);
+    obs_data_set_default_bool(settings, "sunglasses_overlay", false);
+    obs_data_set_default_bool(settings, "pirate_hat_overlay", false);
+    obs_data_set_default_bool(settings, "clown_mask_overlay", false);
+    obs_data_set_default_bool(settings, "emotion_overlay", false);
+    obs_data_set_default_double(settings, "emotion_min_confidence", 0.55);
+    obs_data_set_default_int(settings, "emotion_interval_ms", 500);
+    obs_data_set_default_int(settings, "overlay_slot_1", 1);
+    obs_data_set_default_int(settings, "overlay_slot_2", 2);
+    obs_data_set_default_int(settings, "overlay_slot_3", 3);
 
 }
 
@@ -307,8 +308,8 @@ static void face_update(void *data, obs_data_t *settings)
     filter->face_min_size = obs_data_get_double(settings, "face_min_size");
     filter->tracking_smoothing = obs_data_get_double(settings, "tracking_smoothing");
     filter->tracking_iou = std::max(0.05, obs_data_get_double(settings, "tracking_iou"));
-    filter->tracking_hold = std::max(1, static_cast<int>(obs_data_get_int(settings, "tracking_hold")));
-    filter->flip_analysis_vertical = false;
+    filter->tracking_hold = std::max(0, static_cast<int>(obs_data_get_int(settings, "tracking_hold")));
+    filter->flip_analysis_vertical = obs_data_get_bool(settings, "flip_analysis_vertical");
     filter->face_box_width = obs_data_get_double(settings, "face_box_width");
     filter->face_box_color = static_cast<uint32_t>(obs_data_get_int(settings, "face_box_color"));
     filter->sunglasses_overlay = obs_data_get_bool(settings, "sunglasses_overlay");
@@ -915,7 +916,7 @@ static void render_faces(vision_filter_data *filter, uint32_t source_width,
             ? static_cast<float>(filter->sunglasses_image.cx) /
               static_cast<float>(filter->sunglasses_image.cy)
             : 1.0f;
-        const float overlay_width = target.width;
+        const float overlay_width = target.width * 1.20f;
         const float overlay_height = overlay_width *
             (static_cast<float>(source_width) / static_cast<float>(source_height)) /
             image_aspect;
@@ -930,9 +931,10 @@ static void render_faces(vision_filter_data *filter, uint32_t source_width,
         };
     }
     gs_effect_set_vec4(filter->sunglasses_box_param, &sunglasses_box);
-    // YuNet eye landmarks provide the live face inclination. The shader uses
-    // the inverse sampling angle to rotate the glasses along that eye line.
-    gs_effect_set_float(filter->sunglasses_angle_param, -target.angle);
+    // YuNet eye landmarks provide the live face inclination. The shader
+    // performs inverse sampling internally, so pass the detected eye-line
+    // angle directly here.
+    gs_effect_set_float(filter->sunglasses_angle_param, target.angle);
     gs_effect_set_texture(filter->sunglasses_image_param,
                           filter->sunglasses_image.texture);
 
@@ -948,7 +950,7 @@ static void render_faces(vision_filter_data *filter, uint32_t source_width,
             ? static_cast<float>(filter->pirate_hat_image.cx) /
               static_cast<float>(filter->pirate_hat_image.cy)
             : 1.0f;
-        const float hat_width = target.width * 2.00f;
+        const float hat_width = target.width * 3.00f;
         const float hat_height = hat_width *
             (static_cast<float>(source_width) / static_cast<float>(source_height)) /
             image_aspect;
@@ -1041,6 +1043,28 @@ static void render_faces(vision_filter_data *filter, uint32_t source_width,
                    face.width, face.height};
         }
         gs_effect_set_vec4(filter->face_box_params[i], &box);
+        for (size_t landmark = 0; landmark < 3; ++landmark) {
+            struct vec4 points = {-1.0f, -1.0f, -1.0f, -1.0f};
+            for (size_t point_index = 0; point_index < 2; ++point_index) {
+                const size_t source_index = landmark * 4 + point_index * 2;
+                if (i < faces.size() && source_index + 1 < faces[i].landmarks.size()) {
+                    if (point_index == 0) {
+                        points.x = faces[i].landmarks[source_index];
+                        points.y = faces[i].landmarks[source_index + 1];
+                    } else {
+                        points.z = faces[i].landmarks[source_index];
+                        points.w = faces[i].landmarks[source_index + 1];
+                    }
+                    if (filter->flip_analysis_vertical) {
+                        if (point_index == 0)
+                            points.y = 1.0f - points.y;
+                        else
+                            points.w = 1.0f - points.w;
+                    }
+                }
+            }
+            gs_effect_set_vec4(filter->landmark_params[i][landmark], &points);
+        }
 
     }
     set_color(filter->face_box_color_param, filter->face_box_color);
@@ -1381,6 +1405,12 @@ static void *filter_create(obs_data_t *settings, obs_source_t *source,
     for (size_t i = 0; i < MAX_FACE_BOXES; ++i) {
         const std::string name = "face_box" + std::to_string(i);
         filter->face_box_params[i] = gs_effect_get_param_by_name(filter->effect, name.c_str());
+        for (size_t landmark = 0; landmark < 3; ++landmark) {
+            const std::string landmark_name = "face_landmarks" + std::to_string(i) + "_" +
+                                              std::to_string(landmark);
+            filter->landmark_params[i][landmark] =
+                gs_effect_get_param_by_name(filter->effect, landmark_name.c_str());
+        }
 
     }
 
