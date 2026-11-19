@@ -54,6 +54,7 @@ uniform float4 clown_mask_box;
 uniform float clown_mask_angle;
 uniform texture2d clown_mask_image;
 uniform texture2d emotion_image;
+uniform float emotion_alpha;
 uniform float4 emotion_box0;
 uniform float4 emotion_box1;
 uniform float4 emotion_box2;
@@ -136,7 +137,7 @@ void blend_emotion(inout float3 result, float2 uv, float4 box, float4 atlas_rect
         return;
     float2 atlas_uv = atlas_rect.xy + local_uv * atlas_rect.zw;
     float4 emoji = emotion_image.Sample(linear_sampler, atlas_uv);
-    result = lerp(result, emoji.rgb, emoji.a);
+    result = lerp(result, emoji.rgb, emoji.a * emotion_alpha);
 }
 
 float4 PSFace(VertData v) : TARGET

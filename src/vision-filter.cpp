@@ -90,6 +90,7 @@ struct vision_filter_data {
     gs_eparam_t *clown_mask_angle_param = nullptr;
     gs_eparam_t *clown_mask_image_param = nullptr;
     gs_eparam_t *emotion_image_param = nullptr;
+    gs_eparam_t *emotion_alpha_param = nullptr;
     std::array<gs_eparam_t *, 10> emotion_box_params{};
     std::array<gs_eparam_t *, 10> emotion_uv_params{};
     std::array<gs_eparam_t *, MAX_FACE_BOXES> face_box_params{};
@@ -121,6 +122,8 @@ struct vision_filter_data {
     bool emotion_overlay = false;
     double emotion_min_confidence = 0.55;
     int emotion_interval_ms = 500;
+    double emotion_size_ratio = 0.55;
+    double emotion_alpha = 1.0;
     gs_image_file_t emotion_image{};
     bool emotion_image_ready = false;
     std::array<int, 3> overlay_slots = {1, 2, 3};
@@ -227,6 +230,8 @@ static void face_defaults(obs_data_t *settings)
     obs_data_set_default_bool(settings, "emotion_overlay", false);
     obs_data_set_default_double(settings, "emotion_min_confidence", 0.55);
     obs_data_set_default_int(settings, "emotion_interval_ms", 500);
+    obs_data_set_default_double(settings, "emotion_size_ratio", 0.55);
+    obs_data_set_default_double(settings, "emotion_alpha", 1.0);
     obs_data_set_default_int(settings, "overlay_slot_1", 1);
     obs_data_set_default_int(settings, "overlay_slot_2", 2);
     obs_data_set_default_int(settings, "overlay_slot_3", 3);
@@ -271,6 +276,12 @@ static obs_properties_t *face_properties(void *)
     obs_properties_add_int_slider(props, "emotion_interval_ms",
                                   obs_module_text("EmotionIntervalMs"),
                                   200, 2000, 100);
+    obs_properties_add_float_slider(props, "emotion_size_ratio",
+                                    obs_module_text("EmotionSizeRatio"),
+                                    0.10, 2.00, 0.05);
+    obs_properties_add_float_slider(props, "emotion_alpha",
+                                    obs_module_text("EmotionAlpha"),
+                                    0.0, 1.0, 0.05);
     for (int slot = 1; slot <= 3; ++slot) {
         const std::string name = "overlay_slot_" + std::to_string(slot);
         obs_property_t *list = obs_properties_add_list(
@@ -321,6 +332,8 @@ static void face_update(void *data, obs_data_t *settings)
     filter->emotion_overlay = obs_data_get_bool(settings, "emotion_overlay");
     filter->emotion_min_confidence = obs_data_get_double(settings, "emotion_min_confidence");
     filter->emotion_interval_ms = static_cast<int>(obs_data_get_int(settings, "emotion_interval_ms"));
+    filter->emotion_size_ratio = std::clamp(obs_data_get_double(settings, "emotion_size_ratio"), 0.10, 2.00);
+    filter->emotion_alpha = std::clamp(obs_data_get_double(settings, "emotion_alpha"), 0.0, 1.0);
     for (size_t i = 0; i < filter->overlay_slots.size(); ++i) {
         const std::string name = "overlay_slot_" + std::to_string(i + 1);
         filter->overlay_slots[i] = static_cast<int>(obs_data_get_int(settings, name.c_str()));
@@ -919,7 +932,7 @@ static void render_faces(vision_filter_data *filter, uint32_t source_width,
             ? static_cast<float>(filter->sunglasses_image.cx) /
               static_cast<float>(filter->sunglasses_image.cy)
             : 1.0f;
-        const float overlay_width = target.width * 1.20f;
+        const float overlay_width = target.width;
         const float overlay_height = overlay_width *
             (static_cast<float>(source_width) / static_cast<float>(source_height)) /
             image_aspect;
@@ -953,7 +966,7 @@ static void render_faces(vision_filter_data *filter, uint32_t source_width,
             ? static_cast<float>(filter->pirate_hat_image.cx) /
               static_cast<float>(filter->pirate_hat_image.cy)
             : 1.0f;
-        const float hat_width = target.width * 3.00f;
+        const float hat_width = target.width * 2.50f;
         const float hat_height = hat_width *
             (static_cast<float>(source_width) / static_cast<float>(source_height)) /
             image_aspect;
@@ -1008,6 +1021,8 @@ static void render_faces(vision_filter_data *filter, uint32_t source_width,
                           filter->clown_mask_image.texture);
 
     gs_effect_set_texture(filter->emotion_image_param, filter->emotion_image.texture);
+    gs_effect_set_float(filter->emotion_alpha_param,
+                        static_cast<float>(filter->emotion_alpha));
     std::vector<size_t> emotion_ranks(faces.size());
     std::iota(emotion_ranks.begin(), emotion_ranks.end(), 0);
     std::sort(emotion_ranks.begin(), emotion_ranks.end(), [&faces](size_t a, size_t b) {
@@ -1022,7 +1037,7 @@ static void render_faces(vision_filter_data *filter, uint32_t source_width,
             const int emotion = dominant_emotion(
                 face, static_cast<float>(filter->emotion_min_confidence));
             if (emotion >= 0) {
-                const float emoji_width = face.width * 0.55f;
+                const float emoji_width = face.width * static_cast<float>(filter->emotion_size_ratio);
                 const float emoji_height = emoji_width *
                     (static_cast<float>(source_width) / static_cast<float>(source_height));
                 const float center_x = face.x + face.width * 0.5f;
@@ -1398,6 +1413,7 @@ static void *filter_create(obs_data_t *settings, obs_source_t *source,
     filter->clown_mask_angle_param = gs_effect_get_param_by_name(filter->effect, "clown_mask_angle");
     filter->clown_mask_image_param = gs_effect_get_param_by_name(filter->effect, "clown_mask_image");
     filter->emotion_image_param = gs_effect_get_param_by_name(filter->effect, "emotion_image");
+    filter->emotion_alpha_param = gs_effect_get_param_by_name(filter->effect, "emotion_alpha");
     for (size_t i = 0; i < 10; ++i) {
         filter->emotion_box_params[i] = gs_effect_get_param_by_name(
             filter->effect, ("emotion_box" + std::to_string(i)).c_str());
