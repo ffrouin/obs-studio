@@ -166,16 +166,19 @@ struct vision_filter_data {
     face_box sunglasses_candidate{};
     face_box sunglasses_locked_box{};
     std::chrono::steady_clock::time_point sunglasses_candidate_since{};
+    std::chrono::steady_clock::time_point sunglasses_display_until{};
     bool pirate_hat_candidate_valid = false;
     bool pirate_hat_locked = false;
     face_box pirate_hat_candidate{};
     face_box pirate_hat_locked_box{};
     std::chrono::steady_clock::time_point pirate_hat_candidate_since{};
+    std::chrono::steady_clock::time_point pirate_hat_display_until{};
     bool clown_mask_candidate_valid = false;
     bool clown_mask_locked = false;
     face_box clown_mask_candidate{};
     face_box clown_mask_locked_box{};
     std::chrono::steady_clock::time_point clown_mask_candidate_since{};
+    std::chrono::steady_clock::time_point clown_mask_display_until{};
 
 
     std::mutex detection_mutex;
@@ -496,7 +499,7 @@ static std::vector<face_box> update_tracks(std::vector<face_track> &tracks,
 
     std::vector<face_box> result;
     result.reserve(std::min(tracks.size(), MAX_FACE_BOXES));
-    constexpr auto minimum_lifetime = std::chrono::milliseconds(200);
+    constexpr auto minimum_lifetime = std::chrono::milliseconds(60);
     for (const face_track &track : tracks) {
         if (result.size() == MAX_FACE_BOXES)
             break;
@@ -957,12 +960,36 @@ static size_t configured_overlay_rank(const vision_filter_data *filter, int over
     return MAX_FACE_BOXES;
 }
 
+static bool target_is_visible(const face_box &locked_box,
+                              const std::vector<face_box> &faces)
+{
+    for (const face_box &face : faces) {
+        if (box_iou(locked_box, face) >= 0.05f)
+            return true;
+        const float locked_center_x = locked_box.x + locked_box.width * 0.5f;
+        const float locked_center_y = locked_box.y + locked_box.height * 0.5f;
+        const float face_center_x = face.x + face.width * 0.5f;
+        const float face_center_y = face.y + face.height * 0.5f;
+        const float distance = std::hypot(locked_center_x - face_center_x,
+                                         locked_center_y - face_center_y);
+        if (distance <= std::max(locked_box.width, locked_box.height) * 0.75f)
+            return true;
+    }
+    return false;
+}
+
 static bool update_sunglasses_target(vision_filter_data *filter,
                                      const std::vector<face_box> &faces,
                                      size_t rank, face_box &target)
 {
     if (!filter->sunglasses_overlay || !detection_is_alive(filter) ||
         faces.size() <= rank) {
+        filter->sunglasses_candidate_valid = false;
+        filter->sunglasses_locked = false;
+        return false;
+    }
+    if (filter->sunglasses_locked &&
+        !target_is_visible(filter->sunglasses_locked_box, faces)) {
         filter->sunglasses_candidate_valid = false;
         filter->sunglasses_locked = false;
         return false;
@@ -975,7 +1002,14 @@ static bool update_sunglasses_target(vision_filter_data *filter,
     const face_box biggest = sorted_faces[sorted_faces.size() - 1 - rank];
     const auto now = std::chrono::steady_clock::now();
     constexpr float target_iou = 0.25f;
-    constexpr auto lock_delay = std::chrono::milliseconds(600);
+    constexpr auto lock_delay = std::chrono::milliseconds(80);
+    constexpr auto maximum_display_time = std::chrono::seconds(30);
+
+    if (filter->sunglasses_locked &&
+        now >= filter->sunglasses_display_until) {
+        filter->sunglasses_locked = false;
+        filter->sunglasses_candidate_valid = false;
+    }
 
     if (!filter->sunglasses_locked) {
         if (!filter->sunglasses_candidate_valid ||
@@ -990,7 +1024,8 @@ static bool update_sunglasses_target(vision_filter_data *filter,
         if (now - filter->sunglasses_candidate_since >= lock_delay) {
             filter->sunglasses_locked = true;
             filter->sunglasses_locked_box = biggest;
-            VISION_LOG(LOG_INFO, "Face sunglasses target locked after 600 ms");
+            filter->sunglasses_display_until = now + maximum_display_time;
+            VISION_LOG(LOG_INFO, "Face sunglasses target locked after 80 ms");
         }
     } else if (box_iou(filter->sunglasses_locked_box, biggest) >= target_iou) {
         filter->sunglasses_locked_box = biggest;
@@ -1007,8 +1042,9 @@ static bool update_sunglasses_target(vision_filter_data *filter,
 
         if (now - filter->sunglasses_candidate_since >= lock_delay) {
             filter->sunglasses_locked_box = biggest;
+            filter->sunglasses_display_until = now + maximum_display_time;
             filter->sunglasses_candidate_valid = false;
-            VISION_LOG(LOG_INFO, "Face sunglasses target switched after 600 ms");
+            VISION_LOG(LOG_INFO, "Face sunglasses target switched after 80 ms");
         }
     }
 
@@ -1029,6 +1065,13 @@ static bool update_pirate_hat_target(vision_filter_data *filter,
         return false;
     }
 
+    if (filter->pirate_hat_locked &&
+        !target_is_visible(filter->pirate_hat_locked_box, faces)) {
+        filter->pirate_hat_candidate_valid = false;
+        filter->pirate_hat_locked = false;
+        return false;
+    }
+
     std::vector<face_box> sorted_faces = faces;
     std::sort(sorted_faces.begin(), sorted_faces.end(), [](const face_box &a, const face_box &b) {
         return a.width * a.height > b.width * b.height;
@@ -1036,7 +1079,14 @@ static bool update_pirate_hat_target(vision_filter_data *filter,
     const face_box second_face = sorted_faces[rank];
     const auto now = std::chrono::steady_clock::now();
     constexpr float target_iou = 0.25f;
-    constexpr auto lock_delay = std::chrono::milliseconds(600);
+    constexpr auto lock_delay = std::chrono::milliseconds(80);
+    constexpr auto maximum_display_time = std::chrono::seconds(30);
+
+    if (filter->pirate_hat_locked &&
+        now >= filter->pirate_hat_display_until) {
+        filter->pirate_hat_locked = false;
+        filter->pirate_hat_candidate_valid = false;
+    }
 
     if (!filter->pirate_hat_locked) {
         if (!filter->pirate_hat_candidate_valid ||
@@ -1050,7 +1100,8 @@ static bool update_pirate_hat_target(vision_filter_data *filter,
         if (now - filter->pirate_hat_candidate_since >= lock_delay) {
             filter->pirate_hat_locked = true;
             filter->pirate_hat_locked_box = second_face;
-            VISION_LOG(LOG_INFO, "Face pirate hat target locked after 600 ms");
+            filter->pirate_hat_display_until = now + maximum_display_time;
+            VISION_LOG(LOG_INFO, "Face pirate hat target locked after 80 ms");
         }
     } else if (box_iou(filter->pirate_hat_locked_box, second_face) >= target_iou) {
         filter->pirate_hat_locked_box = second_face;
@@ -1066,8 +1117,9 @@ static bool update_pirate_hat_target(vision_filter_data *filter,
         }
         if (now - filter->pirate_hat_candidate_since >= lock_delay) {
             filter->pirate_hat_locked_box = second_face;
+            filter->pirate_hat_display_until = now + maximum_display_time;
             filter->pirate_hat_candidate_valid = false;
-            VISION_LOG(LOG_INFO, "Face pirate hat target switched after 600 ms");
+            VISION_LOG(LOG_INFO, "Face pirate hat target switched after 80 ms");
         }
     }
 
@@ -1089,6 +1141,13 @@ static bool update_clown_mask_target(vision_filter_data *filter,
         return false;
     }
 
+    if (filter->clown_mask_locked &&
+        !target_is_visible(filter->clown_mask_locked_box, faces)) {
+        filter->clown_mask_candidate_valid = false;
+        filter->clown_mask_locked = false;
+        return false;
+    }
+
     std::vector<face_box> sorted_faces = faces;
     std::sort(sorted_faces.begin(), sorted_faces.end(), [](const face_box &a, const face_box &b) {
         return a.width * a.height > b.width * b.height;
@@ -1096,7 +1155,14 @@ static bool update_clown_mask_target(vision_filter_data *filter,
     const face_box third_face = sorted_faces[rank];
     const auto now = std::chrono::steady_clock::now();
     constexpr float target_iou = 0.25f;
-    constexpr auto lock_delay = std::chrono::milliseconds(600);
+    constexpr auto lock_delay = std::chrono::milliseconds(80);
+    constexpr auto maximum_display_time = std::chrono::seconds(30);
+
+    if (filter->clown_mask_locked &&
+        now >= filter->clown_mask_display_until) {
+        filter->clown_mask_locked = false;
+        filter->clown_mask_candidate_valid = false;
+    }
 
     if (!filter->clown_mask_locked) {
         if (!filter->clown_mask_candidate_valid ||
@@ -1110,7 +1176,8 @@ static bool update_clown_mask_target(vision_filter_data *filter,
         if (now - filter->clown_mask_candidate_since >= lock_delay) {
             filter->clown_mask_locked = true;
             filter->clown_mask_locked_box = third_face;
-            VISION_LOG(LOG_INFO, "Face clown mask target locked after 600 ms");
+            filter->clown_mask_display_until = now + maximum_display_time;
+            VISION_LOG(LOG_INFO, "Face clown mask target locked after 80 ms");
         }
     } else if (box_iou(filter->clown_mask_locked_box, third_face) >= target_iou) {
         filter->clown_mask_locked_box = third_face;
@@ -1126,8 +1193,9 @@ static bool update_clown_mask_target(vision_filter_data *filter,
         }
         if (now - filter->clown_mask_candidate_since >= lock_delay) {
             filter->clown_mask_locked_box = third_face;
+            filter->clown_mask_display_until = now + maximum_display_time;
             filter->clown_mask_candidate_valid = false;
-            VISION_LOG(LOG_INFO, "Face clown mask target switched after 600 ms");
+            VISION_LOG(LOG_INFO, "Face clown mask target switched after 80 ms");
         }
     }
 
