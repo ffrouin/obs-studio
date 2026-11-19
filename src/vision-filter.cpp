@@ -122,6 +122,7 @@ struct vision_filter_data {
     bool pirate_hat_overlay = false;
     bool clown_mask_overlay = false;
     bool darth_vader_overlay = false;
+    bool mustache_overlay = false;
     bool emotion_overlay = false;
     double emotion_min_confidence = 0.55;
     int emotion_interval_ms = 500;
@@ -137,10 +138,12 @@ struct vision_filter_data {
     gs_image_file_t pirate_hat_image{};
     gs_image_file_t clown_mask_image{};
     gs_image_file_t darth_vader_image{};
+    gs_image_file_t mustache_image{};
     bool sunglasses_image_ready = false;
     bool pirate_hat_image_ready = false;
     bool clown_mask_image_ready = false;
     bool darth_vader_image_ready = false;
+    bool mustache_image_ready = false;
     bool sunglasses_candidate_valid = false;
     bool sunglasses_locked = false;
     face_box sunglasses_candidate{};
@@ -236,6 +239,7 @@ static void face_defaults(obs_data_t *settings)
     obs_data_set_default_bool(settings, "pirate_hat_overlay", false);
     obs_data_set_default_bool(settings, "clown_mask_overlay", false);
     obs_data_set_default_bool(settings, "darth_vader_overlay", false);
+    obs_data_set_default_bool(settings, "mustache_overlay", false);
     obs_data_set_default_bool(settings, "emotion_overlay", false);
     obs_data_set_default_double(settings, "emotion_min_confidence", 0.55);
     obs_data_set_default_int(settings, "emotion_interval_ms", 500);
@@ -281,6 +285,7 @@ static obs_properties_t *face_properties(void *)
     obs_properties_add_bool(props, "pirate_hat_overlay", obs_module_text("PirateHatOverlay"));
     obs_properties_add_bool(props, "clown_mask_overlay", obs_module_text("ClownMaskOverlay"));
     obs_properties_add_bool(props, "darth_vader_overlay", obs_module_text("DarthVaderOverlay"));
+    obs_properties_add_bool(props, "mustache_overlay", obs_module_text("MustacheOverlay"));
     obs_properties_add_bool(props, "emotion_overlay", obs_module_text("EmotionOverlay"));
     obs_properties_add_float_slider(props, "emotion_min_confidence",
                                     obs_module_text("EmotionMinConfidence"),
@@ -309,6 +314,7 @@ static obs_properties_t *face_properties(void *)
         obs_property_list_add_int(list, obs_module_text("OverlayPirateHat"), 2);
         obs_property_list_add_int(list, obs_module_text("OverlayClownMask"), 3);
         obs_property_list_add_int(list, obs_module_text("OverlayDarkVador"), 4);
+        obs_property_list_add_int(list, obs_module_text("OverlayMustache"), 5);
     }
 
     return props;
@@ -348,6 +354,7 @@ static void face_update(void *data, obs_data_t *settings)
     filter->pirate_hat_overlay = obs_data_get_bool(settings, "pirate_hat_overlay");
     filter->clown_mask_overlay = obs_data_get_bool(settings, "clown_mask_overlay");
     filter->darth_vader_overlay = obs_data_get_bool(settings, "darth_vader_overlay");
+    filter->mustache_overlay = obs_data_get_bool(settings, "mustache_overlay");
     filter->emotion_overlay = obs_data_get_bool(settings, "emotion_overlay");
     filter->emotion_min_confidence = obs_data_get_double(settings, "emotion_min_confidence");
     filter->emotion_interval_ms = static_cast<int>(obs_data_get_int(settings, "emotion_interval_ms"));
@@ -882,7 +889,8 @@ static bool update_clown_mask_target(vision_filter_data *filter,
                                      const std::vector<face_box> &faces,
                                      size_t rank, face_box &target)
 {
-    if ((!filter->clown_mask_overlay && !filter->darth_vader_overlay) || !detection_is_alive(filter) ||
+    if ((!filter->clown_mask_overlay && !filter->darth_vader_overlay &&
+         !filter->mustache_overlay) || !detection_is_alive(filter) ||
         faces.size() <= rank) {
         filter->clown_mask_candidate_valid = false;
         filter->clown_mask_locked = false;
@@ -1018,12 +1026,20 @@ static void render_faces(vision_filter_data *filter, uint32_t source_width,
     face_box mask_target{};
     const size_t clown_mask_rank = configured_overlay_rank(filter, 3);
     const size_t darth_vader_rank = configured_overlay_rank(filter, 4);
+    const size_t mustache_rank = configured_overlay_rank(filter, 5);
+    const bool use_mustache = filter->mustache_overlay &&
+        filter->mustache_image_ready && mustache_rank < MAX_FACE_BOXES &&
+        (clown_mask_rank >= MAX_FACE_BOXES || mustache_rank < clown_mask_rank) &&
+        (darth_vader_rank >= MAX_FACE_BOXES || mustache_rank < darth_vader_rank);
     const bool use_darth_vader = filter->darth_vader_overlay &&
         filter->darth_vader_image_ready && darth_vader_rank < MAX_FACE_BOXES &&
-        (clown_mask_rank >= MAX_FACE_BOXES || darth_vader_rank < clown_mask_rank);
-    const size_t mask_rank = use_darth_vader ? darth_vader_rank : clown_mask_rank;
-    const gs_image_file_t &mask_image = use_darth_vader
-        ? filter->darth_vader_image : filter->clown_mask_image;
+        (clown_mask_rank >= MAX_FACE_BOXES || darth_vader_rank < clown_mask_rank) &&
+        (!use_mustache || darth_vader_rank < mustache_rank);
+    const size_t mask_rank = use_mustache ? mustache_rank
+        : (use_darth_vader ? darth_vader_rank : clown_mask_rank);
+    const gs_image_file_t &mask_image = use_mustache
+        ? filter->mustache_image
+        : (use_darth_vader ? filter->darth_vader_image : filter->clown_mask_image);
     if (filter->face_detection && mask_image.loaded && mask_image.texture &&
         mask_rank < MAX_FACE_BOXES &&
         update_clown_mask_target(filter, faces, mask_rank, mask_target)) {
@@ -1032,16 +1048,23 @@ static void render_faces(vision_filter_data *filter, uint32_t source_width,
               static_cast<float>(mask_image.cy)
             : 1.0f;
         const float mask_width = mask_target.width *
-            (use_darth_vader ? 3.50f : 1.10f);
+            (use_mustache ? 0.70f : (use_darth_vader ? 3.50f : 1.10f));
         const float mask_height = mask_width *
             (static_cast<float>(source_width) / static_cast<float>(source_height)) /
             image_aspect;
         const float target_y = filter->flip_analysis_vertical
             ? 1.0f - (mask_target.y + mask_target.height)
             : mask_target.y;
-        const float center_x = mask_target.x + mask_target.width * 0.5f;
-        const float center_y = target_y + mask_target.height *
-            (use_darth_vader ? 0.50f : 0.58f);
+        const float center_x = mask_target.nose_x;
+        const float mouth_y = filter->flip_analysis_vertical
+            ? 1.0f - (mask_target.landmarks[7] + mask_target.landmarks[9]) * 0.5f
+            : (mask_target.landmarks[7] + mask_target.landmarks[9]) * 0.5f;
+        // Keep the mustache horizontally centered on the nose, while placing
+        // its visible hair just above the mouth line.
+        const float center_y = use_mustache
+            ? mouth_y - mask_height * 0.20f
+            : target_y + mask_target.height *
+                  (use_darth_vader ? 0.50f : 0.58f);
         clown_mask_box = {
             center_x - mask_width * 0.5f,
             center_y - mask_height * 0.5f,
@@ -1054,8 +1077,9 @@ static void render_faces(vision_filter_data *filter, uint32_t source_width,
     gs_effect_set_vec4(filter->clown_mask_box_param, &clown_mask_box);
     gs_effect_set_float(filter->clown_mask_angle_param, clown_mask_angle);
     gs_effect_set_texture(filter->clown_mask_image_param,
-                          use_darth_vader ? filter->darth_vader_image.texture
-                                          : filter->clown_mask_image.texture);
+                          use_mustache ? filter->mustache_image.texture
+                          : (use_darth_vader ? filter->darth_vader_image.texture
+                                             : filter->clown_mask_image.texture));
 
     gs_effect_set_texture(filter->emotion_image_param, filter->emotion_image.texture);
     gs_effect_set_float(filter->emotion_alpha_param,
@@ -1347,6 +1371,7 @@ static void filter_destroy(void *data)
         gs_image_file_free(&filter->pirate_hat_image);
         gs_image_file_free(&filter->clown_mask_image);
         gs_image_file_free(&filter->darth_vader_image);
+        gs_image_file_free(&filter->mustache_image);
         gs_image_file_free(&filter->emotion_image);
     }
     gs_effect_destroy(filter->effect);
@@ -1368,6 +1393,7 @@ static void *filter_create(obs_data_t *settings, obs_source_t *source,
     char *pirate_hat_path = face_only ? obs_module_file("images/pirate_hat.png") : nullptr;
     char *clown_mask_path = face_only ? obs_module_file("images/clown_mask.png") : nullptr;
     char *darth_vader_path = face_only ? obs_module_file("images/darth_vader_mask.png") : nullptr;
+    char *mustache_path = face_only ? obs_module_file("images/mustache.png") : nullptr;
     char *emotion_image_path = face_only ? obs_module_file("images/emotion_emoji_atlas.png") : nullptr;
     char *emotion_model_path = face_only ? obs_module_file(
         "models/emotion-ferplus-8.onnx") : nullptr;
@@ -1386,6 +1412,7 @@ static void *filter_create(obs_data_t *settings, obs_source_t *source,
         bfree(pirate_hat_path);
         bfree(clown_mask_path);
         bfree(darth_vader_path);
+        bfree(mustache_path);
         bfree(emotion_image_path);
         bfree(emotion_model_path);
         delete filter;
@@ -1437,6 +1464,14 @@ static void *filter_create(obs_data_t *settings, obs_source_t *source,
         else
             VISION_LOG(LOG_INFO, "Loaded Darth Vader mask overlay texture %ux%u",
                  filter->darth_vader_image.cx, filter->darth_vader_image.cy);
+        gs_image_file_init(&filter->mustache_image, mustache_path);
+        obs_enter_graphics();
+        gs_image_file_init_texture(&filter->mustache_image);
+        obs_leave_graphics();
+        filter->mustache_image_ready = filter->mustache_image.loaded &&
+                                               filter->mustache_image.texture != nullptr;
+        if (!filter->mustache_image_ready)
+            VISION_LOG(LOG_WARNING, "Could not load mustache overlay: %s", mustache_path);
         gs_image_file_init(&filter->emotion_image, emotion_image_path);
         obs_enter_graphics();
         gs_image_file_init_texture(&filter->emotion_image);
@@ -1511,6 +1546,7 @@ static void *filter_create(obs_data_t *settings, obs_source_t *source,
     bfree(pirate_hat_path);
     bfree(clown_mask_path);
     bfree(darth_vader_path);
+    bfree(mustache_path);
     bfree(emotion_image_path);
     bfree(emotion_model_path);
     if (face_only) {
