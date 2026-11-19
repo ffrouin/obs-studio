@@ -997,7 +997,7 @@ static void render_faces(vision_filter_data *filter, uint32_t source_width,
             ? static_cast<float>(filter->clown_mask_image.cx) /
               static_cast<float>(filter->clown_mask_image.cy)
             : 1.0f;
-        const float mask_width = mask_target.width * 1.35f;
+        const float mask_width = mask_target.width * 1.10f;
         const float mask_height = mask_width *
             (static_cast<float>(source_width) / static_cast<float>(source_height)) /
             image_aspect;
@@ -1005,7 +1005,7 @@ static void render_faces(vision_filter_data *filter, uint32_t source_width,
             ? 1.0f - (mask_target.y + mask_target.height)
             : mask_target.y;
         const float center_x = mask_target.x + mask_target.width * 0.5f;
-        const float center_y = target_y + mask_target.height * 0.5f;
+        const float center_y = target_y + mask_target.height * 0.58f;
         clown_mask_box = {
             center_x - mask_width * 0.5f,
             center_y - mask_height * 0.5f,
