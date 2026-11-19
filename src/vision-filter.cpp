@@ -112,7 +112,7 @@ struct vision_filter_data {
     double tracking_smoothing = 0.45;
     double tracking_iou = 0.10;
     int tracking_hold = 5;
-    bool flip_analysis_vertical = true;
+    bool flip_analysis_vertical = false;
     uint32_t face_box_color = 0xFF00FF00;
     double face_box_width = 0.004;
     bool sunglasses_overlay = false;
@@ -309,7 +309,10 @@ static void face_update(void *data, obs_data_t *settings)
     filter->tracking_smoothing = obs_data_get_double(settings, "tracking_smoothing");
     filter->tracking_iou = std::max(0.05, obs_data_get_double(settings, "tracking_iou"));
     filter->tracking_hold = std::max(0, static_cast<int>(obs_data_get_int(settings, "tracking_hold")));
-    filter->flip_analysis_vertical = obs_data_get_bool(settings, "flip_analysis_vertical");
+    // The proven OBS/XComposite path already uses the same vertical origin as
+    // the shader. Keep this diagnostic-only option disabled to avoid applying
+    // a stale persisted flip to the live coordinate mapping.
+    filter->flip_analysis_vertical = false;
     filter->face_box_width = obs_data_get_double(settings, "face_box_width");
     filter->face_box_color = static_cast<uint32_t>(obs_data_get_int(settings, "face_box_color"));
     filter->sunglasses_overlay = obs_data_get_bool(settings, "sunglasses_overlay");
