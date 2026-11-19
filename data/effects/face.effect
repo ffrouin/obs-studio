@@ -55,6 +55,15 @@ uniform float clown_mask_angle;
 uniform texture2d clown_mask_image;
 uniform texture2d emotion_image;
 uniform float emotion_alpha;
+uniform float emotion_panel_alpha;
+uniform float emotion_panel_score0;
+uniform float emotion_panel_score1;
+uniform float emotion_panel_score2;
+uniform float emotion_panel_score3;
+uniform float emotion_panel_score4;
+uniform float emotion_panel_score5;
+uniform float emotion_panel_score6;
+uniform float emotion_panel_score7;
 uniform float4 emotion_box0;
 uniform float4 emotion_box1;
 uniform float4 emotion_box2;
@@ -140,6 +149,78 @@ void blend_emotion(inout float3 result, float2 uv, float4 box, float4 atlas_rect
     result = lerp(result, emoji.rgb, emoji.a * emotion_alpha);
 }
 
+float rounded_box(float2 uv, float left, float top, float width, float height, float radius)
+{
+    float2 center = float2(left + width * 0.5, top + height * 0.5);
+    float2 half_size = float2(width * 0.5, height * 0.5);
+    float2 q = abs(uv - center) - (half_size - radius);
+    float distance_to_edge = length(max(q, 0.0)) +
+                             min(max(q.x, q.y), 0.0) - radius;
+    return 1.0 - smoothstep(-0.001, 0.001, distance_to_edge);
+}
+
+void blend_emotion_panel_row(inout float3 result, float2 uv, float score, float index)
+{
+    float panel_left = 0.82;
+    float panel_top = 0.035;
+    float row_height = 0.024;
+    float icon_left = panel_left + 0.004;
+    float icon_width = 0.018;
+    float bar_left = panel_left + 0.027;
+    float bar_width = 0.12;
+    float y = panel_top + index * row_height;
+    float2 local = uv - float2(panel_left, y);
+    if (local.x < 0.0 || local.x > 0.16 || local.y < 0.0 || local.y > row_height)
+        return;
+    float row_top = y + 0.002;
+    float row_height_inner = row_height - 0.004;
+    float row_background = rounded_box(uv, panel_left + 0.003, row_top,
+                                       0.154, row_height_inner, 0.006);
+    result = lerp(result, float3(0.055, 0.065, 0.075), row_background * emotion_panel_alpha * 0.75);
+    if (local.x >= icon_left - panel_left && local.x <= icon_left - panel_left + icon_width) {
+        float2 icon_uv = float2((local.x - (icon_left - panel_left)) / icon_width,
+                                local.y / row_height);
+        float2 atlas_uv = float2(index / 8.0 + icon_uv.x / 8.0, icon_uv.y);
+        float4 emoji = emotion_image.Sample(linear_sampler, atlas_uv);
+        result = lerp(result, emoji.rgb, emoji.a * emotion_panel_alpha);
+        return;
+    }
+    float bar_top = y + row_height * 0.34;
+    float bar_height = row_height * 0.32;
+    float bar_background = rounded_box(uv, bar_left, bar_top, bar_width,
+                                       bar_height, bar_height * 0.5);
+    result = lerp(result, float3(0.14, 0.16, 0.18),
+                  bar_background * emotion_panel_alpha);
+    float fill_width = max(0.001, bar_width * score);
+    float bar_fill = rounded_box(uv, bar_left, bar_top, fill_width,
+                                 bar_height, bar_height * 0.5);
+    result = lerp(result, float3(0.20, 0.82, 0.48),
+                  bar_fill * emotion_panel_alpha);
+}
+
+void blend_emotion_panel_background(inout float3 result, float2 uv)
+{
+    float panel_left = 0.81;
+    float panel_top = 0.025;
+    float panel_width = 0.17;
+    float panel_height = 0.215;
+    float radius = 0.012;
+    float2 center = float2(panel_left + panel_width * 0.5,
+                           panel_top + panel_height * 0.5);
+    float2 half_size = float2(panel_width * 0.5, panel_height * 0.5);
+    float2 q = abs(uv - center) - (half_size - radius);
+    float distance_to_edge = length(max(q, 0.0)) +
+                             min(max(q.x, q.y), 0.0) - radius;
+    float outer = 1.0 - smoothstep(-0.001, 0.001, distance_to_edge);
+    float2 inner_half_size = half_size - 0.002;
+    float2 inner_q = abs(uv - center) - (inner_half_size - radius);
+    float inner_distance = length(max(inner_q, 0.0)) +
+                           min(max(inner_q.x, inner_q.y), 0.0) - radius;
+    float inner = 1.0 - smoothstep(-0.001, 0.001, inner_distance);
+    result = lerp(result, float3(0.05, 0.75, 0.35), outer * emotion_panel_alpha * 0.70);
+    result = lerp(result, float3(0.015, 0.015, 0.02), inner * emotion_panel_alpha * 0.90);
+}
+
 float4 PSFace(VertData v) : TARGET
 {
     float4 original = image.Sample(linear_sampler, v.uv);
@@ -182,6 +263,22 @@ float4 PSFace(VertData v) : TARGET
     blend_emotion(result, v.uv, emotion_box7, emotion_uv7);
     blend_emotion(result, v.uv, emotion_box8, emotion_uv8);
     blend_emotion(result, v.uv, emotion_box9, emotion_uv9);
+
+    float panel_total = emotion_panel_score0 + emotion_panel_score1 +
+                        emotion_panel_score2 + emotion_panel_score3 +
+                        emotion_panel_score4 + emotion_panel_score5 +
+                        emotion_panel_score6 + emotion_panel_score7;
+    if (panel_total > 0.0) {
+        blend_emotion_panel_background(result, v.uv);
+        blend_emotion_panel_row(result, v.uv, emotion_panel_score0, 0.0);
+        blend_emotion_panel_row(result, v.uv, emotion_panel_score1, 1.0);
+        blend_emotion_panel_row(result, v.uv, emotion_panel_score2, 2.0);
+        blend_emotion_panel_row(result, v.uv, emotion_panel_score3, 3.0);
+        blend_emotion_panel_row(result, v.uv, emotion_panel_score4, 4.0);
+        blend_emotion_panel_row(result, v.uv, emotion_panel_score5, 5.0);
+        blend_emotion_panel_row(result, v.uv, emotion_panel_score6, 6.0);
+        blend_emotion_panel_row(result, v.uv, emotion_panel_score7, 7.0);
+    }
 
 
     if (face_count > 0 && on_face_box(v.uv, face_box0)) result = face_box_color.rgb;

@@ -91,6 +91,8 @@ struct vision_filter_data {
     gs_eparam_t *clown_mask_image_param = nullptr;
     gs_eparam_t *emotion_image_param = nullptr;
     gs_eparam_t *emotion_alpha_param = nullptr;
+    gs_eparam_t *emotion_panel_alpha_param = nullptr;
+    std::array<gs_eparam_t *, 8> emotion_panel_score_params{};
     std::array<gs_eparam_t *, 10> emotion_box_params{};
     std::array<gs_eparam_t *, 10> emotion_uv_params{};
     std::array<gs_eparam_t *, MAX_FACE_BOXES> face_box_params{};
@@ -124,6 +126,9 @@ struct vision_filter_data {
     int emotion_interval_ms = 500;
     double emotion_size_ratio = 0.55;
     double emotion_alpha = 1.0;
+    bool emotion_panel = false;
+    double emotion_panel_alpha = 0.90;
+    std::array<std::atomic<uint64_t>, 8> emotion_panel_counters{};
     gs_image_file_t emotion_image{};
     bool emotion_image_ready = false;
     std::array<int, 3> overlay_slots = {1, 2, 3};
@@ -232,6 +237,8 @@ static void face_defaults(obs_data_t *settings)
     obs_data_set_default_int(settings, "emotion_interval_ms", 500);
     obs_data_set_default_double(settings, "emotion_size_ratio", 0.55);
     obs_data_set_default_double(settings, "emotion_alpha", 1.0);
+    obs_data_set_default_bool(settings, "emotion_panel", false);
+    obs_data_set_default_double(settings, "emotion_panel_alpha", 0.90);
     obs_data_set_default_int(settings, "overlay_slot_1", 1);
     obs_data_set_default_int(settings, "overlay_slot_2", 2);
     obs_data_set_default_int(settings, "overlay_slot_3", 3);
@@ -281,6 +288,11 @@ static obs_properties_t *face_properties(void *)
                                     0.10, 2.00, 0.05);
     obs_properties_add_float_slider(props, "emotion_alpha",
                                     obs_module_text("EmotionAlpha"),
+                                    0.0, 1.0, 0.05);
+    obs_properties_add_bool(props, "emotion_panel",
+                            obs_module_text("EmotionPanel"));
+    obs_properties_add_float_slider(props, "emotion_panel_alpha",
+                                    obs_module_text("EmotionPanelAlpha"),
                                     0.0, 1.0, 0.05);
     for (int slot = 1; slot <= 3; ++slot) {
         const std::string name = "overlay_slot_" + std::to_string(slot);
@@ -334,6 +346,8 @@ static void face_update(void *data, obs_data_t *settings)
     filter->emotion_interval_ms = static_cast<int>(obs_data_get_int(settings, "emotion_interval_ms"));
     filter->emotion_size_ratio = std::clamp(obs_data_get_double(settings, "emotion_size_ratio"), 0.10, 2.00);
     filter->emotion_alpha = std::clamp(obs_data_get_double(settings, "emotion_alpha"), 0.0, 1.0);
+    filter->emotion_panel = obs_data_get_bool(settings, "emotion_panel");
+    filter->emotion_panel_alpha = std::clamp(obs_data_get_double(settings, "emotion_panel_alpha"), 0.0, 1.0);
     for (size_t i = 0; i < filter->overlay_slots.size(); ++i) {
         const std::string name = "overlay_slot_" + std::to_string(i + 1);
         filter->overlay_slots[i] = static_cast<int>(obs_data_get_int(settings, name.c_str()));
@@ -685,6 +699,12 @@ static void detector_loop(vision_filter_data *filter)
                 update_emotion_state(
                     tracked[ranked[i]],
                     static_cast<float>(filter->emotion_min_confidence), now);
+                const int accepted_emotion = dominant_emotion(
+                    tracked[ranked[i]],
+                    static_cast<float>(filter->emotion_min_confidence));
+                if (accepted_emotion >= 0)
+                    filter->emotion_panel_counters[static_cast<size_t>(accepted_emotion)]
+                        .fetch_add(1, std::memory_order_relaxed);
             }
         }
         for (size_t i = 0; i < tracks.size() && i < tracked.size(); ++i) {
@@ -1023,6 +1043,23 @@ static void render_faces(vision_filter_data *filter, uint32_t source_width,
     gs_effect_set_texture(filter->emotion_image_param, filter->emotion_image.texture);
     gs_effect_set_float(filter->emotion_alpha_param,
                         static_cast<float>(filter->emotion_alpha));
+    std::array<float, 8> panel_scores{};
+    uint64_t panel_total = 0;
+    for (size_t emotion = 0; emotion < panel_scores.size(); ++emotion)
+        panel_total += filter->emotion_panel_counters[emotion].load(
+            std::memory_order_relaxed);
+    if (panel_total > 0) {
+        for (size_t emotion = 0; emotion < panel_scores.size(); ++emotion)
+            panel_scores[emotion] = static_cast<float>(
+                filter->emotion_panel_counters[emotion].load(std::memory_order_relaxed)) /
+                static_cast<float>(panel_total);
+    }
+    if (!filter->emotion_panel)
+        panel_scores.fill(0.0f);
+    for (size_t emotion = 0; emotion < panel_scores.size(); ++emotion)
+        gs_effect_set_float(filter->emotion_panel_score_params[emotion], panel_scores[emotion]);
+    gs_effect_set_float(filter->emotion_panel_alpha_param,
+                        static_cast<float>(filter->emotion_panel_alpha));
     std::vector<size_t> emotion_ranks(faces.size());
     std::iota(emotion_ranks.begin(), emotion_ranks.end(), 0);
     std::sort(emotion_ranks.begin(), emotion_ranks.end(), [&faces](size_t a, size_t b) {
@@ -1414,6 +1451,10 @@ static void *filter_create(obs_data_t *settings, obs_source_t *source,
     filter->clown_mask_image_param = gs_effect_get_param_by_name(filter->effect, "clown_mask_image");
     filter->emotion_image_param = gs_effect_get_param_by_name(filter->effect, "emotion_image");
     filter->emotion_alpha_param = gs_effect_get_param_by_name(filter->effect, "emotion_alpha");
+    filter->emotion_panel_alpha_param = gs_effect_get_param_by_name(filter->effect, "emotion_panel_alpha");
+    for (size_t i = 0; i < filter->emotion_panel_score_params.size(); ++i)
+        filter->emotion_panel_score_params[i] = gs_effect_get_param_by_name(
+            filter->effect, ("emotion_panel_score" + std::to_string(i)).c_str());
     for (size_t i = 0; i < 10; ++i) {
         filter->emotion_box_params[i] = gs_effect_get_param_by_name(
             filter->effect, ("emotion_box" + std::to_string(i)).c_str());
